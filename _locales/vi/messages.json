@@ -1,0 +1,8 @@
+{
+  "extName": {
+    "message": "VidTrans - Dịch Video Trực Tiếp"
+  },
+  "extDesc": {
+    "message": "Tiện ích mở rộng Chrome dịch video theo thời gian thực sử dụng Web Speech API và Groq."
+  }
+}
