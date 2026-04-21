@@ -3,83 +3,39 @@
 (async function () {
   'use strict';
 
-  if (window.__vidtrans_ui_injected__) {
-    const root = document.getElementById('vidtrans-root');
-    if (root) {
-      root.style.display = root.style.display === 'none' ? 'block' : 'none';
-    }
-    return;
+  if (window.__vidtrans_injected__) {
+    console.log('[VidTrans] ℹ️ Script already injected, checking UI...');
+    // If already injected, we still want to ensure the panel is visible if requested
+    // but we don't want to re-run the entire initialization if possible.
   }
-  window.__vidtrans_ui_injected__ = true;
+  window.__vidtrans_injected__ = true;
+  console.log('[VidTrans] 🚀 Content script initializing...');
 
   // ── Storage Keys ───────────────────────────────────────────────────────────
   const API_KEY_STORAGE = 'vidtrans_groq_key';
   const SOURCE_LANG_STORAGE = 'vidtrans_source_lang';
   const PANEL_POS_STORAGE = 'vidtrans_panel_pos';
+  const TTS_RATE_STORAGE = 'vidtrans_tts_rate';
+  const TTS_VOICE_STORAGE = 'vidtrans_tts_voice';
 
   // ── Load State ─────────────────────────────────────────────────────────────
-  const state = await chrome.storage.local.get([API_KEY_STORAGE, SOURCE_LANG_STORAGE, PANEL_POS_STORAGE]);
-  let apiKey = state[API_KEY_STORAGE] || '';
-  let sourceLang = state[SOURCE_LANG_STORAGE] || 'en-US';
-  let panelPos = state[PANEL_POS_STORAGE] || { right: '20px', top: '20px' };
+  let apiKey = '';
+  let targetLang = 'vi';  // Language user wants to hear (was: sourceLang)
+  let ttsRate = 1.3;
+  let ttsVoice = 'vi-VN-HoaiNinhNeural';
+  let panelPos = { right: '20px', top: '20px' };
 
-  // ── TTS Queue (lazy init) ─────────────────────────────────────────────────
-  let ttsQueue = null;
+  try {
+    const state = await chrome.storage.local.get([API_KEY_STORAGE, SOURCE_LANG_STORAGE, PANEL_POS_STORAGE, TTS_RATE_STORAGE, TTS_VOICE_STORAGE]);
 
-  /** @returns {{ speak: Function, cancel: Function, queueLength: number }} */
-  function getTTSQueue() {
-    if (!ttsQueue) {
-      // Dynamic import to avoid loading if not needed
-      ttsQueue = createTTSQueue();
-    }
-    return ttsQueue;
-  }
-
-  /**
-   * @returns {import('../lib/tts-queue.js').TTSQueue}
-   */
-  function createTTSQueue() {
-    // Inline TTSQueue — content script can't use ES modules
-    class InlineTTSQueue {
-      constructor() {
-        this._queue = [];
-        this._isPlaying = false;
-      }
-
-      speak(text) {
-        if (!text?.trim()) return;
-        const trimmed = text.trim();
-        if (this._queue.includes(trimmed)) return;
-        this._queue.push(trimmed);
-        if (!this._isPlaying) this._playNext();
-      }
-
-      cancel() {
-        speechSynthesis.cancel();
-        this._queue = [];
-        this._isPlaying = false;
-      }
-
-      get queueLength() { return this._queue.length; }
-
-      _playNext() {
-        if (this._queue.length === 0) {
-          this._isPlaying = false;
-          restoreVideoVolume();
-          return;
-        }
-        this._isPlaying = true;
-        const text = this._queue.shift();
-        const utt = new SpeechSynthesisUtterance(text);
-        utt.lang = 'vi-VN';
-        utt.rate = 1.1;
-        utt.onend = () => this._playNext();
-        utt.onerror = () => this._playNext();
-        duckVideoVolume();
-        speechSynthesis.speak(utt);
-      }
-    }
-    return new InlineTTSQueue();
+    apiKey = state[API_KEY_STORAGE] || '';
+    targetLang = state[SOURCE_LANG_STORAGE] || 'vi';
+    ttsRate = state[TTS_RATE_STORAGE] || 1.3;
+    ttsVoice = state[TTS_VOICE_STORAGE] || 'vi-VN-HoaiMyNeural';
+    panelPos = state[PANEL_POS_STORAGE] || { right: '20px', top: '20px' };
+  } catch (err) {
+    console.error('[VidTrans] Failed to load state (context might be invalidated):', err);
+    // Continue with defaults if possible, but some APIs might be unavailable
   }
 
   // ── Audio Ducking ──────────────────────────────────────────────────────────
@@ -101,23 +57,41 @@
         v.volume = origVol;
       }
     });
-    // Clear after short delay to avoid restoring mid-sentence
-    setTimeout(() => videoVolumeMap.clear(), 2000);
+    // Clear after short delay
+    setTimeout(() => videoVolumeMap.clear(), 1000);
   }
 
   // ── Create Container ────────────────────────────────────────────────────────
-  const container = document.createElement('div');
-  container.id = 'vidtrans-root';
-  Object.assign(container.style, {
-    position: 'fixed',
-    right: panelPos.right,
-    top: panelPos.top,
-    zIndex: '2147483647',
-  });
-  document.body.appendChild(container);
+  let container = document.getElementById('vidtrans-root');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'vidtrans-root';
+    Object.assign(container.style, {
+      position: 'fixed',
+      right: panelPos.right,
+      top: panelPos.top,
+      zIndex: '2147483647',
+      display: 'none', // Hidden by default until toggled
+    });
+    document.body.appendChild(container);
+    // Ensure styles are updated (in case they changed)
+    container.style.right = panelPos.right;
+    container.style.top = panelPos.top;
+    // Don't set display: 'none' here if it's already block, 
+    // especially if we just set it to block in the re-injection check above.
+    if (container.style.display !== 'block') {
+      container.style.display = 'none';
+    }
+  }
 
   // Shadow DOM for CSS isolation
-  const shadow = container.attachShadow({ mode: 'open' });
+  let shadow = container.shadowRoot;
+  if (!shadow) {
+    shadow = container.attachShadow({ mode: 'open' });
+  } else {
+    // Clear existing content to re-initialize UI fresh (necessary if extension reloaded)
+    shadow.innerHTML = '';
+  }
 
   // ── Panel HTML ─────────────────────────────────────────────────────────────
   const html = `
@@ -230,6 +204,39 @@
         border-color: var(--primary-color);
       }
 
+      #controls {
+        padding: 12px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .speed-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 8px 0;
+      }
+
+      .speed-control label {
+        font-size: 11px;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        text-transform: uppercase;
+      }
+
+      .speed-control input[type="range"] {
+        flex: 1;
+        cursor: pointer;
+      }
+
+      #speed-val {
+        font-weight: bold;
+        color: var(--primary-color);
+        min-width: 25px;
+        text-align: right;
+      }
+
       .toggle-btn {
         width: 100%;
         padding: 11px;
@@ -241,7 +248,6 @@
         font-size: 14px;
         cursor: pointer;
         transition: background 0.2s, transform 0.1s;
-        margin-top: 4px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
       }
 
@@ -357,26 +363,41 @@
           <label>Groq API Key</label>
           <input type="password" id="api-key" value="${apiKey}" placeholder="gsk_..." />
         </div>
+        <button class="icon-btn" id="test-tts-btn" style="width: 100%; background: rgba(59, 130, 246, 0.1); color: var(--primary-color); border: 1px solid var(--primary-color); padding: 8px; border-radius: 8px; font-size: 12px; font-weight: 600; margin-top: 5px;">
+          🔊 TEST GIỌNG ĐỌC
+        </button>
       </div>
 
       <div class="content">
         <div class="form-group">
-          <label>Ngôn ngữ video</label>
+          <label>Ngôn ngữ muốn nghe</label>
           <select id="source-lang">
-            <option value="en-US" ${sourceLang==='en-US'?'selected':''}>English (Mỹ)</option>
-            <option value="en-GB" ${sourceLang==='en-GB'?'selected':''}>English (Anh)</option>
-            <option value="ja-JP" ${sourceLang==='ja-JP'?'selected':''}>日本語 (Nhật)</option>
-            <option value="ko-KR" ${sourceLang==='ko-KR'?'selected':''}>한국어 (Hàn)</option>
-            <option value="zh-CN" ${sourceLang==='zh-CN'?'selected':''}>中文 (Trung)</option>
-            <option value="fr-FR" ${sourceLang==='fr-FR'?'selected':''}>Français (Pháp)</option>
-            <option value="de-DE" ${sourceLang==='de-DE'?'selected':''}>Deutsch (Đức)</option>
-            <option value="es-ES" ${sourceLang==='es-ES'?'selected':''}>Español (Tây)</option>
+            <option value="vi" ${targetLang === 'vi' ? 'selected' : ''}>Tiếng Việt</option>
+            <option value="en" ${targetLang === 'en' ? 'selected' : ''}>English</option>
+            <option value="ja" ${targetLang === 'ja' ? 'selected' : ''}>日本語 (Nhật)</option>
+            <option value="ko" ${targetLang === 'ko' ? 'selected' : ''}>한국어 (Hàn)</option>
+            <option value="zh" ${targetLang === 'zh' ? 'selected' : ''}>中文 (Trung)</option>
+            <option value="fr" ${targetLang === 'fr' ? 'selected' : ''}>Français (Pháp)</option>
+            <option value="de" ${targetLang === 'de' ? 'selected' : ''}>Deutsch (Đức)</option>
+            <option value="es" ${targetLang === 'es' ? 'selected' : ''}>Español (Tây)</option>
           </select>
         </div>
 
         <button class="toggle-btn" id="toggle-btn" ${!apiKey ? 'disabled' : ''}>
           ${!apiKey ? '🔒 Cần API Key' : '▶ BẬT DỊCH'}
         </button>
+
+        <div class="speed-control">
+          <label>Tốc độ: <span id="speed-val">${ttsRate.toFixed(1)}</span>x</label>
+          <input type="range" id="tts-speed" min="0.5" max="2.0" step="0.1" value="${ttsRate}">
+        </div>
+
+        <div class="form-group" style="margin-top: 8px;">
+          <label>Giọng đọc</label>
+          <select id="tts-voice">
+            <!-- Populated dynamically -->
+          </select>
+        </div>
 
         <div class="status-bar" id="status-bar">
           <span class="status-dot" id="status-dot"></span>
@@ -404,9 +425,125 @@
   const statusDot = shadow.getElementById('status-dot');
   const statusText = shadow.getElementById('status-text');
   const transcriptBox = shadow.getElementById('transcript-box');
+  const speedSlider = shadow.getElementById('tts-speed');
+  const speedVal = shadow.getElementById('speed-val');
+  const ttsVoiceSelect = shadow.getElementById('tts-voice');
+  const testTtsBtn = shadow.getElementById('test-tts-btn');
+
+  let subtitleFetcher = null;
+  let subtitleSync = null;
+
+  function initSubtitleFetcher() {
+    if (subtitleFetcher) return true;
+    if (window.SubtitleFetcher) {
+      subtitleFetcher = new window.SubtitleFetcher();
+      console.log('[VidTrans] ✅ SubtitleFetcher initialized');
+      return true;
+    }
+    console.error('[VidTrans] ❌ SubtitleFetcher class not found in window object');
+    return false;
+  }
+
+  // Initial attempt
+  initSubtitleFetcher();
 
   // ── State ─────────────────────────────────────────────────────────────────
   let isRunning = false;
+  let mode = 'live'; // 'live' or 'subtitles'
+  let syncTimer = null;
+
+  // ── Subtitle-mode TTS (Web Speech API — zero offscreen round-trip) ──────────
+  //
+  // For subtitle mode we know all text in advance and timestamps are precise.
+  // Using Web Speech API directly in content.js gives <50ms latency vs 200-600ms
+  // when routing through offscreen. Browser caches the voice after first use.
+  class SubtitleTTS {
+    constructor() {
+      this.voice = null;
+      this.enabled = true;
+      this.lastSpoken = '';
+      this._init();
+    }
+
+    async _init() {
+      await this._findVoice();
+      if (this.voice) {
+        const primer = new SpeechSynthesisUtterance('\u00a0');
+        primer.volume = 0;
+        primer.voice = this.voice;
+        speechSynthesis.speak(primer);
+      }
+    }
+
+    async _findVoice() {
+      const voices = speechSynthesis.getVoices();
+      const selectedUri = ttsVoice;
+      this.voice = voices.find(v => v.voiceURI === selectedUri || v.name === selectedUri);
+      if (!this.voice && voices.length > 0) {
+        this.voice = voices.find(v => v.lang.startsWith(targetLang)) || voices[0];
+      }
+      console.log(`[SubtitleTTS] Ready: ${this.voice?.name || 'Default'}`);
+    }
+
+    speak(text) {
+      if (!this.enabled || !text?.trim()) return;
+
+      if (speechSynthesis.speaking && text === this.lastSpoken) return;
+
+      this.lastSpoken = text;
+      speechSynthesis.cancel();
+
+      // Duck volume for better clarity
+      duckVideoVolume();
+
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.rate = ttsRate;
+      if (this.voice) utt.voice = this.voice;
+
+      const startTime = performance.now();
+
+      utt.onstart = () => {
+        const latency = performance.now() - startTime;
+        console.log(`[SubtitleTTS] 🔊 Speaking (Latency: ${latency.toFixed(0)}ms)`);
+      };
+
+      utt.onend = () => {
+        setTimeout(() => {
+          if (!speechSynthesis.speaking) restoreVideoVolume();
+        }, 300);
+      };
+      utt.onerror = () => restoreVideoVolume();
+
+      // Try-speak logic to overcome browser stalls
+      const doSpeak = (retries = 0) => {
+        if (retries > 2 || !this.enabled) return;
+        speechSynthesis.speak(utt);
+
+        // Increased to 1000ms to give Online voices (like VI) time to update state
+        setTimeout(() => {
+          const isSpeaking = speechSynthesis.speaking;
+          const isPending = speechSynthesis.pending;
+          
+          if (!isSpeaking && !isPending && this.enabled) {
+            console.warn(`[SubtitleTTS] Speech stalled (Retrying ${retries + 1}/3)... State: speaking=${isSpeaking}, pending=${isPending}`);
+            doSpeak(retries + 1);
+          } else {
+            // Log for debugging state update speed
+            console.log(`[SubtitleTTS] State check at 1000ms: speaking=${isSpeaking}, pending=${isPending}`);
+          }
+        }, 1000);
+      };
+      doSpeak();
+    }
+
+    stop() {
+      this.enabled = false;
+      speechSynthesis.cancel();
+      restoreVideoVolume();
+    }
+  }
+
+  let subtitleTts = null;
 
   // ── Subtitle Overlay ───────────────────────────────────────────────────────
   let subtitleOverlay = null;
@@ -441,14 +578,6 @@
     `;
 
     subtitleOverlay.classList.remove('vidtrans-hidden');
-
-    // Auto-hide after 4 seconds of silence
-    clearTimeout(window.__vidtrans_hide_timeout);
-    window.__vidtrans_hide_timeout = setTimeout(() => {
-      if (subtitleOverlay && !subtitleOverlay.classList.contains('vidtrans-hidden')) {
-        subtitleOverlay.classList.add('vidtrans-hidden');
-      }
-    }, 4000);
   }
 
   function escapeHtml(text) {
@@ -549,7 +678,7 @@
     chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' });
   });
 
-  // API Key save
+  // API Key save — now using local storage for persistence
   apiKeyInput.addEventListener('input', async (e) => {
     const val = e.target.value.trim();
     await chrome.storage.local.set({ [API_KEY_STORAGE]: val });
@@ -566,16 +695,94 @@
     }
   });
 
+  // Dynamic Voice List Management
+  function updateVoiceList() {
+    const voices = speechSynthesis.getVoices();
+    const langPrefix = targetLang.split('-')[0];
+
+    // Filter voices by selected target language
+    const filtered = voices.filter(v => v.lang.startsWith(langPrefix));
+
+    if (!ttsVoiceSelect) return; // UI not ready
+    ttsVoiceSelect.innerHTML = '';
+
+    if (filtered.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = voices.length === 0 ? 'Đang nạp giọng nói...' : `Không tìm thấy giọng ${langPrefix.toUpperCase()}`;
+      opt.disabled = true;
+      ttsVoiceSelect.appendChild(opt);
+      return;
+    }
+
+    filtered.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.voiceURI;
+      opt.textContent = v.name;
+      if (v.voiceURI === ttsVoice) opt.selected = true;
+      ttsVoiceSelect.appendChild(opt);
+    });
+
+    // Update current ttsVoice if it was empty or not in the new list (safely)
+    const currentStillValid = filtered.find(v => v.voiceURI === ttsVoice);
+    if (!currentStillValid && filtered.length > 0) {
+      ttsVoice = filtered[0].voiceURI;
+      chrome.storage.local.set({ [TTS_VOICE_STORAGE]: ttsVoice });
+    }
+
+    if (subtitleTts) subtitleTts._findVoice();
+  }
+
+  // Voice loading is async
+  speechSynthesis.onvoiceschanged = updateVoiceList;
+  updateVoiceList(); // Try immediate
+
   // Source language save
   sourceLangSelect.addEventListener('change', async (e) => {
-    sourceLang = e.target.value;
-    await chrome.storage.local.set({ [SOURCE_LANG_STORAGE]: sourceLang });
+    targetLang = e.target.value;
+    await chrome.storage.local.set({ [SOURCE_LANG_STORAGE]: targetLang });
+    updateVoiceList(); // Refresh voices for new language
+  });
+
+  // Speed rate save
+  speedSlider.addEventListener('input', async (e) => {
+    ttsRate = parseFloat(e.target.value);
+    speedVal.textContent = ttsRate.toFixed(1);
+    await chrome.storage.local.set({ [TTS_RATE_STORAGE]: ttsRate });
+  });
+
+  // Voice save
+  ttsVoiceSelect.addEventListener('change', async (e) => {
+    ttsVoice = e.target.value;
+    await chrome.storage.local.set({ [TTS_VOICE_STORAGE]: ttsVoice });
+    if (subtitleTts) subtitleTts._findVoice();
+  });
+
+  // Test TTS
+  testTtsBtn.addEventListener('click', () => {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'TEST_TTS',
+        text: 'Chào bạn, đây là giọng đọc thử nghiệm của hệ thống VidTrans.',
+        ttsRate: ttsRate,
+        ttsVoice: ttsVoice
+      });
+    } catch (err) {
+      if (err.message.includes('context invalidated')) {
+        alert('Extension đã được cập nhật. Vui lòng F5 lại trang YouTube để tiếp tục!');
+      } else {
+        console.error('[VidTrans] Test TTS error:', err);
+      }
+    }
   });
 
   // Toggle translation
   toggleBtn.addEventListener('click', () => {
+    console.log('[VidTrans] 🖱️ Toggle button clicked, current state isRunning:', isRunning);
     if (!isRunning) {
-      startTranslation();
+      startTranslation().catch(err => {
+        console.error('[VidTrans] ❌ Failed to start translation:', err);
+        setStatus('Lỗi khởi động: ' + err.message, 'error');
+      });
     } else {
       stopTranslation();
     }
@@ -583,51 +790,268 @@
 
   // ── Translation Control ────────────────────────────────────────────────────
 
-  function startTranslation() {
+  async function startTranslationMode() {
+    const video = document.querySelector('video');
+    if (!video) {
+      setStatus('Không tìm thấy video', 'error');
+      isRunning = false;
+      updateToggleButton();
+      return;
+    }
+
+    try {
+      // Try to get subtitles first
+      setStatus('Đang quét phụ đề...', 'warning');
+      console.log('[VidTrans] 🔍 Scanning for subtitles at:', window.location.href);
+
+      // Small delay to ensure YouTube scripts/DOM are ready
+      await new Promise(r => setTimeout(r, 800));
+
+      // Ensure subtitle fetcher is initialized (retry if it was missing during boot)
+      if (!subtitleFetcher) {
+        console.log('[VidTrans] 🔄 Attempting to re-initialize SubtitleFetcher...');
+        initSubtitleFetcher();
+      }
+
+      let subs = null;
+      if (subtitleFetcher) {
+        console.log('[VidTrans] 📥 Calling fetchSubtitles with target language:', targetLang);
+        subs = await subtitleFetcher.fetchSubtitles(window.location.href, targetLang);
+      } else {
+        console.warn('[VidTrans] ⚠️ SubtitleFetcher still missing, skipping subtitle scan.');
+      }
+
+      if (subs && subs.events && subs.events.length > 0) {
+        log(`[VidTrans] 📝 Found ${subs.events.length} subtitles (${subs.lang}), needsTranslation=${subs.needsTranslation}`);
+        mode = 'subtitles';
+
+        await startSyncTimer(video, subs);
+
+      } else {
+        log('[VidTrans] 🎙️ No subtitles found or timed out, using LIVE MODE');
+        mode = 'live';
+        chrome.runtime.sendMessage({
+          type: 'START_TRANSLATION',
+          targetLang: targetLang, // Renamed from sourceLang
+          ttsRate: ttsRate,
+          ttsVoice: ttsVoice,
+          apiKey: apiKey
+        });
+        setStatus('Đang dịch trực tiếp', 'active');
+      }
+    } catch (err) {
+      logError('[VidTrans] ❌ Error during translation mode startup:', err);
+      setStatus('Lỗi khởi tạo. Chuyển sang Dịch trực tiếp...', 'warning');
+
+      // Fallback to Live Mode
+      mode = 'live';
+      chrome.runtime.sendMessage({
+        type: 'START_TRANSLATION',
+        targetLang: targetLang, // Renamed from sourceLang
+        ttsRate: ttsRate,
+        ttsVoice: ttsVoice,
+        apiKey: apiKey
+      });
+      setStatus('Đang dịch trực tiếp', 'active');
+    }
+  }
+
+  // ── Groq Batch Translate ───────────────────────────────────────────────────
+  const LANG_NAMES = {
+    vi: 'Vietnamese', en: 'English', ja: 'Japanese', ko: 'Korean',
+    zh: 'Chinese', fr: 'French', de: 'German', es: 'Spanish',
+  };
+  const CHUNK_SIZE = 50; // Lines per API call — stays well within token limits
+
+  async function translateChunk(texts, langName) {
+    const numbered = texts.map((t, i) => `${i + 1}. ${t}`).join('\n');
+    const prompt = `Translate the following subtitle lines to ${langName}.
+Output ONLY the translations with same numbering (1. 2. 3. ...). No extra text.
+
+${numbered}`;
+
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: texts.length * 80,
+        temperature: 0.1,
+      })
+    });
+
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    const raw = data.choices?.[0]?.message?.content?.trim() || '';
+    if (!raw) throw new Error('Empty Groq response');
+
+    // Parse "N. text" → map index → translation
+    const result = new Array(texts.length);
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^(\d+)\.\s*(.+)/);
+      if (m) {
+        const idx = parseInt(m[1], 10) - 1;
+        if (idx >= 0 && idx < texts.length) result[idx] = m[2].trim();
+      }
+    }
+    return result;
+  }
+
+  async function groqTranslateBatch(events, langCode) {
+    if (!apiKey) return events;
+    const langName = LANG_NAMES[langCode] || langCode;
+    console.log(`[VidTrans] 🌐 Batch translating ${events.length} events → ${langName}`);
+
+    // Deduplicate for API efficiency
+    const unique = [...new Set(events.map(e => e.text).filter(t => t.trim()))];
+    const translationMap = new Map();
+
+    // Chunk into CHUNK_SIZE batches
+    const chunks = [];
+    for (let i = 0; i < unique.length; i += CHUNK_SIZE) {
+      chunks.push(unique.slice(i, i + CHUNK_SIZE));
+    }
+
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      setStatus(`Đang dịch... (${ci * CHUNK_SIZE + chunk.length}/${unique.length})`, 'warning');
+      try {
+        const translated = await translateChunk(chunk, langName);
+        chunk.forEach((original, i) => {
+          if (translated[i]) translationMap.set(original, translated[i]);
+        });
+        console.log(`[VidTrans] ✅ Chunk ${ci + 1}/${chunks.length}: ${translationMap.size} translated`);
+      } catch (err) {
+        console.error(`[VidTrans] ❌ Chunk ${ci + 1} failed:`, err.message);
+        // Keep untranslated for this chunk — show original as fallback
+      }
+    }
+
+    console.log(`[VidTrans] 🎉 Total: ${translationMap.size}/${unique.length} lines translated`);
+
+    return events.map(e => ({
+      ...e,
+      translated: translationMap.get(e.text) || null, // null = show original
+    }));
+  }
+
+  async function startSyncTimer(video, subs) {
+    if (subtitleSync) subtitleSync.stop();
+
+    if (!window.SubtitleSync) {
+      console.error('[VidTrans] SubtitleSync not loaded');
+      return;
+    }
+
+    let events = subs.events;
+
+    if (subs.needsTranslation) {
+      setStatus('Đang dịch toàn bộ phụ đề...', 'warning');
+      events = await groqTranslateBatch(subs.events, targetLang);
+      console.log('[VidTrans] ✅ Batch translation complete');
+    }
+
+    subtitleSync = new window.SubtitleSync();
+    subtitleSync.load(events);
+
+    // DEBUG: Auto-log the first 20 events to help diagnose latency
+    console.log("%c--- DỮ LIỆU PHỤ ĐỀ (DEBUG) ---", "color: #2563eb; font-weight: bold; font-size: 14px;");
+    const debugData = events.slice(0, 20).map((e, i) => ({
+      "STT": i + 1,
+      "Mốc (s)": (e.start / 1000).toFixed(2),
+      "Dài (s)": (e.duration / 1000).toFixed(2),
+      "Gốc (Anh)": e.text,
+      "Dịch (Việt)": e.translated || "(N/A)",
+      "Tỷ lệ dài": ((e.translated || "").length / (e.text || 1).length).toFixed(1) + 'x'
+    }));
+    console.table(debugData);
+
+    subtitleTts = new SubtitleTTS();
+
+    subtitleSync.start(
+      video,
+      (displayText, originalText) => {
+        updateSubtitle(originalText, displayText);
+        addTranscript(originalText || displayText, displayText);
+        // 🔊 Speak directly — no offscreen round-trip, <50ms latency
+        subtitleTts.speak(displayText);
+      },
+      () => {
+        if (subtitleOverlay) subtitleOverlay.classList.add('vidtrans-hidden');
+      }
+    );
+
+    const label = subs.needsTranslation
+      ? `Phụ đề (${subs.lang.toUpperCase()}) → đã dịch`
+      : `Phụ đề native (${subs.lang.toUpperCase()})`;
+    setStatus(label, 'active');
+    console.log('[VidTrans] ▶ SubtitleSync started —', label);
+  }
+
+
+  function updateToggleButton() {
+    if (isRunning) {
+      toggleBtn.textContent = '⏸ TẮT DỊCH';
+      toggleBtn.classList.add('active');
+    } else {
+      toggleBtn.textContent = '▶ BẬT DỊCH';
+      toggleBtn.classList.remove('active');
+    }
+  }
+
+  async function startTranslation() {
+    console.log('[VidTrans] 🚀 Starting translation process...');
+    if (!apiKey) {
+      alert('Vui lòng nhập Groq API Key!');
+      settingsBtn.click();
+      return;
+    }
+
     isRunning = true;
-    toggleBtn.textContent = '⏸ TẮT DỊCH';
-    toggleBtn.classList.add('active');
+    updateToggleButton();
     transcriptBox.innerHTML = '';
-    setStatus('Đang kết nối...', 'warning');
 
     createSubtitleOverlay();
-
-    // Init TTS (pre-warm voices)
-    getTTSQueue();
-
-    chrome.runtime.sendMessage({
-      type: 'START_TRANSLATION',
-      sourceLang: sourceLang
-    }, (response) => {
-      if (response?.error) {
-        setStatus(response.error, 'error');
-      }
-    });
+    await startTranslationMode();
   }
 
   function stopTranslation() {
+    console.log('[VidTrans] 🛑 Stopping translation...');
     isRunning = false;
-    toggleBtn.textContent = '▶ BẬT DỊCH';
-    toggleBtn.classList.remove('active');
-    setStatus('Đã dừng', 'idle');
-
-    // Stop TTS
-    if (ttsQueue) {
-      ttsQueue.cancel();
-    }
-
-    // Hide subtitle
-    if (subtitleOverlay) {
-      subtitleOverlay.classList.add('vidtrans-hidden');
-    }
+    updateToggleButton();
+    if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+    if (subtitleSync) { subtitleSync.stop(); subtitleSync = null; }
+    if (subtitleTts) { subtitleTts.stop(); subtitleTts = null; }
 
     chrome.runtime.sendMessage({ type: 'STOP_TRANSLATION' });
+    setStatus('Sẵn sàng');
+
+    if (subtitleOverlay) {
+      subtitleOverlay.remove();
+      subtitleOverlay = null;
+    }
   }
 
   // ── Message Listener ────────────────────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'TOGGLE_PANEL') {
-      container.style.display = container.style.display === 'none' ? 'block' : 'none';
+      console.log('[VidTrans] 📥 Received TOGGLE_PANEL message:', msg);
+      if (!container) {
+        console.error('[VidTrans] ❌ Cannot toggle panel: container is null');
+        return;
+      }
+
+      if (msg.show === true) {
+        container.style.display = 'block';
+      } else if (msg.show === false) {
+        container.style.display = 'none';
+      } else {
+        // More robust check for hidden state
+        const isHidden = !container.style.display || container.style.display === 'none';
+        container.style.display = isHidden ? 'block' : 'none';
+      }
+      console.log('[VidTrans] 👁️ Panel display is now:', container.style.display);
 
     } else if (msg.type === 'UPDATE_TRANSCRIPT') {
       const { original, translated } = msg;
@@ -636,16 +1060,16 @@
       addTranscript(original, translated);
       updateSubtitle(original, translated);
 
-      // TTS: speak Vietnamese translation
-      if (isRunning && translated) {
-        getTTSQueue().speak(translated);
-      }
-
       // Update status
       if (isRunning) {
         setStatus('Đang phiên dịch...', 'active');
       }
-
+    } else if (msg.type === 'TTS_STATE_CHANGED') {
+      if (msg.playing) {
+        duckVideoVolume();
+      } else {
+        restoreVideoVolume();
+      }
     } else if (msg.type === 'UPDATE_TRANSCRIPT_ERROR') {
       addStatusMessage(msg.message, msg.isError);
 
@@ -654,6 +1078,9 @@
       } else {
         setStatus(msg.message, 'warning');
       }
+
+    } else if (msg.type === 'UPDATE_TRANSCRIPT_STATUS') {
+      setStatus(msg.message, 'active');
 
     } else if (msg.type === 'CHECK_UI') {
       // Background checking if UI exists — respond ok
@@ -665,18 +1092,22 @@
   if (window.location.hostname.includes('youtube.com')) {
     // yt-navigate-finish fires when YouTube SPA navigation completes
     document.addEventListener('yt-navigate-finish', () => {
-      setTimeout(() => {
-        // Re-check: is our panel still in DOM?
-        if (!document.getElementById('vidtrans-root')) {
-          window.__vidtrans_ui_injected__ = false;
-          // Re-inject not needed here — this script is injected fresh each nav
-        }
-      }, 1000);
+      console.log('[VidTrans] 🔄 YouTube navigation detected');
+
+      // If we are running, we need to restart for the new video
+      if (isRunning) {
+        console.log('[VidTrans] 🔄 Restarting translation for new video...');
+        stopTranslation();
+        setTimeout(() => {
+          startTranslation();
+        }, 1000); // Give it a moment to settle
+      }
     });
 
-    // MutationObserver: detect if <video> appears/disappears
-    const videoObserver = new MutationObserver(() => {
-      // Could trigger re-init here if needed
+    // MutationObserver: detect if <video> appears/disappears (useful for Shorts/Reels)
+    const videoObserver = new MutationObserver((mutations) => {
+      // If a new video appears and we are not running but maybe we should be?
+      // Or if the video was replaced.
     });
     videoObserver.observe(document.body, { childList: true, subtree: true });
   }
@@ -688,4 +1119,16 @@
     setStatus('Chưa có API Key', 'warning');
   }
 
+  // Debug helper: Export raw data to file
+  window.__vidtrans_export_raw = function () {
+    const data = window.__vidtrans_raw_data;
+    if (!data) return console.error("Không có dữ liệu để xuất!");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'raw_subtitles.json';
+    a.click();
+    console.log("Đã xuất file raw_subtitles.json");
+  };
 })();

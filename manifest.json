@@ -14,18 +14,54 @@
     "tabCapture",
     "scripting",
     "activeTab",
-    "storage"
+    "storage",
+    "webRequest",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "*://*.facebook.com/*",
+    "*://*.twitter.com/*",
+    "*://*.x.com/*",
+    "*://*.tiktok.com/*",
+    "*://*.netflix.com/*",
+    "*://*.udemy.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://api.groq.com wss://speech.platform.bing.com https://speech.platform.bing.com"
+  },
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["content/content.js"],
+    "matches": [
+      "*://*.youtube.com/*",
+      "*://*.facebook.com/*",
+      "*://*.twitter.com/*",
+      "*://*.x.com/*",
+      "*://*.tiktok.com/*",
+      "*://*.netflix.com/*",
+      "*://*.udemy.com/*",
+      "*://*.coursera.org/*"
+    ],
+    "js": [
+      "lib/utils.js",
+      "lib/extractors/base-extractor.js",
+      "lib/extractors/youtube-extractor.js",
+      "lib/extractors/tiktok-extractor.js",
+      "lib/subtitle-fetcher.js",
+      "lib/subtitle-sync.js",
+      "content/content.js"
+    ],
     "css": ["content/content.css"],
     "all_frames": false,
     "run_at": "document_idle"
+  }, {
+    "matches": ["*://*.youtube.com/*"],
+    "js": ["lib/pot-interceptor.js"],
+    "run_at": "document_idle",
+    "all_frames": false
   }],
   "action": {
     "default_icon": {
@@ -33,5 +69,14 @@
       "48": "icons/icon-48.png"
     },
     "default_title": "__MSG_extName__"
+  },
+  "commands": {
+    "toggle-panel": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Bật/Tắt bảng phiên dịch"
+    }
   }
 }

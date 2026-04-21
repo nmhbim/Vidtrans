@@ -1,0 +1,16 @@
+# Environment / secrets
+.evn
+.env
+.env.local
+.env.production
+
+# Chrome extension build output (if any)
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
