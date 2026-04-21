@@ -23,9 +23,6 @@ let groqClient = null;
 
 /** @type {string} */
 let currentSourceLang = 'en-US';
-let edgeTts = new EdgeTTS();
-let ttsRate = 1.3;
-
 // TTS Queue state
 let ttsQueue = [];
 let isPlayingTts = false;
@@ -36,9 +33,23 @@ let translationContext = []; // Store last 3 translations for context
 let subtitleTimeline = []; // { startMs, durationMs, text, translated }
 let lastPlayedSubIndex = -1;
 
+/** @type {number} */
+let ttsRate = 1.0;
+
+/** @type {string} */
+let ttsVoice = 'vi-VN-HoaiMyNeural';
+
+/** @type {string} */
+let ttsEngine = 'edge'; // 'edge' or 'native'
+
 /** @type {string|null} */
 let activeStreamId = null;
 let currentSubLang = null;
+
+/** @type {HTMLAudioElement|null} */
+let currentAudio = null;
+/** @type {WebSocket|null} */
+let currentWs = null;
 
 // ── Message Listener ─────────────────────────────────────────────────────────
 
@@ -53,7 +64,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     apiKey = msg.apiKey;
     targetLang = msg.targetLang || 'vi'; // Sync with content.js rename
     ttsRate = msg.ttsRate || 1.3;
-    if (msg.ttsVoice) edgeTts.voice = msg.ttsVoice;
+    if (msg.ttsVoice) ttsVoice = msg.ttsVoice;
+    if (msg.ttsEngine) ttsEngine = msg.ttsEngine;
     
     subtitleTimeline = []; 
     lastPlayedSubIndex = -1;
@@ -65,7 +77,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     log('[Offscreen] ⚡ Processing subtitles (SUBTITLE MODE)...');
     currentSourceLang = msg.sourceLang || 'en-US';
     ttsRate = msg.ttsRate || 1.3;
-    if (msg.ttsVoice) edgeTts.voice = msg.ttsVoice;
+    if (msg.ttsVoice) ttsVoice = msg.ttsVoice;
+    if (msg.ttsEngine) ttsEngine = msg.ttsEngine;
     
     groqClient = new GroqClient(msg.apiKey);
     isTranslating = true;
@@ -75,20 +88,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   } else if (msg.type === 'SYNC_TIME') {
     handleSyncTime(msg.currentTimeMs);
 
-  } else if (msg.type === 'TEST_TTS') {
-    log('[Offscreen] 🔊 Received TEST_TTS');
-    ttsRate = msg.ttsRate || 1.3;
-    if (msg.ttsVoice) edgeTts.voice = msg.ttsVoice;
-    addToTtsQueue(msg.text);
-    sendResponse({ success: true });
-
-  } else if (msg.type === 'SPEAK_SUBTITLE') {
-    // Triggered by SubtitleSync each time a new subtitle is shown.
-    // Pre-translated text arrives ready to speak — no Groq call needed here.
+  } else if (['START_TRANSLATION', 'STOP_TRANSLATION', 'SPEAK_SUBTITLE', 'TEST_TTS'].includes(msg.type)) {
+    log(`[Offscreen] ⚡ TTS Command: ${msg.type} | Engine: ${msg.ttsEngine} | Voice: ${msg.ttsVoice} | Rate: ${msg.ttsRate}`);
+    
     if (msg.ttsRate) ttsRate = msg.ttsRate;
-    if (msg.ttsVoice) edgeTts.voice = msg.ttsVoice;
+    if (msg.ttsVoice) ttsVoice = msg.ttsVoice;
+    if (msg.ttsEngine) ttsEngine = msg.ttsEngine;
+    
     if (msg.text && msg.text.trim()) {
-      // Clear queue so new subtitle interrupts previous one (avoids lag buildup)
+      log(`[Offscreen] 📝 Text: "${msg.text.substring(0, 50)}..."`);
+      stopCurrentTts();
       ttsQueue.length = 0;
       addToTtsQueue(msg.text);
     }
@@ -407,11 +416,14 @@ async function processAudioChunk(audioBlob) {
     // 3. Send to UI
     chrome.runtime.sendMessage({
       type: 'UPDATE_TRANSCRIPT',
-      text: translatedText
+      original: originalText,
+      translated: translatedText
     }).catch(() => {});
 
-    // 4. Add to TTS Queue
-    addToTtsQueue(translatedText);
+    // 4. Add to TTS Queue (only if not native, since content.js handles native directly)
+    if (ttsEngine !== 'native') {
+      addToTtsQueue(translatedText);
+    }
 
   } catch (err) {
     logError('[Offscreen] ❌ Pipeline error:', err.message);
@@ -431,49 +443,28 @@ async function processAudioChunk(audioBlob) {
 
 // ── Message Helpers ─────────────────────────────────────────────────────────
 
-/**
- * @param {string} original
- * @param {string} translated
- */
-function sendTranscript(original, translated) {
-  chrome.runtime.sendMessage({
-    type: 'UPDATE_TRANSCRIPT',
-    original,
-    translated
-  }).catch(() => {});
+import { NativeTTS } from '../lib/tts-engines/native-tts.js';
+import { EdgeTTS } from '../lib/tts-engines/edge-tts.js';
+
+const engines = {
+  'native': new NativeTTS(),
+  'edge': new EdgeTTS()
+};
+
+let currentEngine = null;
+
+function stopCurrentTts() {
+  if (currentEngine) {
+    currentEngine.stop();
+  }
+  isPlayingTts = false;
 }
 
-/**
- * Add text to the high-quality TTS queue
- * @param {string} text 
- */
 function addToTtsQueue(text) {
   ttsQueue.push(text);
   if (!isPlayingTts) {
     playNextInTtsQueue();
   }
-}
-
-/**
- * Play the next item in the Edge TTS queue
- */
-/**
- * Wait for speechSynthesis voices to be loaded
- */
-function getVoicesAsync() {
-  return new Promise((resolve) => {
-    let voices = speechSynthesis.getVoices();
-    if (voices.length > 0) {
-      resolve(voices);
-      return;
-    }
-    speechSynthesis.onvoiceschanged = () => {
-      voices = speechSynthesis.getVoices();
-      resolve(voices);
-    };
-    // Timeout after 2 seconds
-    setTimeout(() => resolve(speechSynthesis.getVoices()), 2000);
-  });
 }
 
 async function playNextInTtsQueue() {
@@ -489,63 +480,22 @@ async function playNextInTtsQueue() {
   const text = ttsQueue.shift();
 
   try {
+    // Determine engine to use from global ttsEngine variable (default 'edge')
+    currentEngine = engines[ttsEngine] || engines['edge'];
+
     // Tell content script to duck volume
     chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: true }).catch(() => {});
 
-    // --- STRATEGY 1: Try Native Edge Voices (Wait for them to load) ---
-    const voices = await getVoicesAsync();
-    const isMale = edgeTts.voice.toLowerCase().includes('nam');
+    log(`[Offscreen] 🔊 Speaking using ${currentEngine.name}: "${text.substring(0, 30)}..."`);
     
-    // Look for "Natural" voices from Microsoft
-    const nativeEdgeVoice = voices.find(v => 
-      v.name.includes('Microsoft') && 
-      v.name.includes('Natural') && 
-      v.lang.startsWith('vi') &&
-      (isMale ? v.name.includes('NamMinh') : v.name.includes('HoaiMy'))
-    );
+    await currentEngine.speak(text, ttsRate, ttsVoice);
+    
+    playNextInTtsQueue();
 
-    if (nativeEdgeVoice) {
-      log(`[Offscreen] 🚀 Using Native Edge Voice: ${nativeEdgeVoice.name}`);
-      const success = await playNativeTts(text, nativeEdgeVoice);
-      if (success) {
-        playNextInTtsQueue();
-        return;
-      }
-    }
-
-    // --- STRATEGY 2: Fallback to Edge TTS WebSocket ---
-    log(`[Offscreen] 🔊 Synthesizing with Edge TTS WebSocket: "${text.substring(0, 30)}..."`);
-    const blob = await edgeTts.synthesize(text, ttsRate);
-    log(`[Offscreen] 📦 Audio blob received: ${(blob.size / 1024).toFixed(1)} KB`);
-
-    if (blob.size < 100) {
-      throw new Error('Audio blob too small, synthesis might have failed');
-    }
-
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio();
-    audio.src = url;
-
-    audio.onended = () => {
-      URL.revokeObjectURL(url);
-      playNextInTtsQueue();
-    };
-
-    audio.onerror = (e) => {
-      logError('[Offscreen] ❌ Audio playback error:', e);
-      URL.revokeObjectURL(url);
-      fallbackToDefaultTTS(text);
-    };
-
-    try {
-      await audio.play();
-    } catch (playErr) {
-      logError('[Offscreen] ❌ Autoplay blocked or play error:', playErr.message);
-      fallbackToDefaultTTS(text);
-    }
   } catch (err) {
     const errMsg = err?.message || 'Lỗi không xác định';
-    logError('[Offscreen] ❌ Edge TTS Error, falling back:', errMsg);
+    logError(`[Offscreen] ❌ TTS Engine Error (${currentEngine.id}):`, errMsg);
+    
     // Report to UI
     chrome.runtime.sendMessage({
       type: 'UPDATE_TRANSCRIPT_ERROR',
@@ -553,12 +503,6 @@ async function playNextInTtsQueue() {
       isError: true
     }).catch(() => {});
     
-    fallbackToDefaultTTS(text);
-  }
-}
-
-/**
- * Play text using native speechSynthesis and return a promise
  */
 function playNativeTts(text, voice) {
   return new Promise((resolve) => {

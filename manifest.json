@@ -26,10 +26,12 @@
     "*://*.x.com/*",
     "*://*.tiktok.com/*",
     "*://*.netflix.com/*",
-    "*://*.udemy.com/*"
+    "*://*.udemy.com/*",
+    "https://speech.platform.bing.com/*",
+    "https://*.tts.speech.microsoft.com/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://api.groq.com wss://speech.platform.bing.com https://speech.platform.bing.com"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://* wss://*"
   },
   "background": {
     "service_worker": "background.js"

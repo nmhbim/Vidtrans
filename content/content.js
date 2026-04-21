@@ -17,22 +17,28 @@
   const PANEL_POS_STORAGE = 'vidtrans_panel_pos';
   const TTS_RATE_STORAGE = 'vidtrans_tts_rate';
   const TTS_VOICE_STORAGE = 'vidtrans_tts_voice';
+  const TTS_ENGINE_STORAGE = 'vidtrans_tts_engine';
+  const SUBTITLE_POS_STORAGE = 'vidtrans_subtitle_pos';
 
   // ── Load State ─────────────────────────────────────────────────────────────
   let apiKey = '';
   let targetLang = 'vi';  // Language user wants to hear (was: sourceLang)
   let ttsRate = 1.3;
-  let ttsVoice = 'vi-VN-HoaiNinhNeural';
+  let ttsVoice = '';
+  let ttsEngine = 'edge';
   let panelPos = { right: '20px', top: '20px' };
+  let subtitlePos = { left: '50%', bottom: '80px' };
 
   try {
-    const state = await chrome.storage.local.get([API_KEY_STORAGE, SOURCE_LANG_STORAGE, PANEL_POS_STORAGE, TTS_RATE_STORAGE, TTS_VOICE_STORAGE]);
+    const state = await chrome.storage.local.get([API_KEY_STORAGE, SOURCE_LANG_STORAGE, PANEL_POS_STORAGE, TTS_RATE_STORAGE, TTS_VOICE_STORAGE, TTS_ENGINE_STORAGE]);
 
     apiKey = state[API_KEY_STORAGE] || '';
     targetLang = state[SOURCE_LANG_STORAGE] || 'vi';
-    ttsRate = state[TTS_RATE_STORAGE] || 1.3;
-    ttsVoice = state[TTS_VOICE_STORAGE] || 'vi-VN-HoaiMyNeural';
+    ttsRate = state[TTS_RATE_STORAGE] !== undefined ? state[TTS_RATE_STORAGE] : 1.3;
+    ttsVoice = state[TTS_VOICE_STORAGE] || '';
+    ttsEngine = state[TTS_ENGINE_STORAGE] || 'edge';
     panelPos = state[PANEL_POS_STORAGE] || { right: '20px', top: '20px' };
+    subtitlePos = state[SUBTITLE_POS_STORAGE] || { left: '50%', bottom: '80px' };
   } catch (err) {
     console.error('[VidTrans] Failed to load state (context might be invalidated):', err);
     // Continue with defaults if possible, but some APIs might be unavailable
@@ -393,7 +399,16 @@
         </div>
 
         <div class="form-group" style="margin-top: 8px;">
+          <label>Engine Đọc (TTS)</label>
+          <select id="tts-engine">
+            <option value="edge" ${ttsEngine === 'edge' ? 'selected' : ''}>Microsoft Edge (Online)</option>
+            <option value="native" ${ttsEngine === 'native' ? 'selected' : ''}>Trình duyệt (Offline)</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="margin-top: 8px;">
           <label>Giọng đọc</label>
+
           <select id="tts-voice">
             <!-- Populated dynamically -->
           </select>
@@ -427,6 +442,7 @@
   const transcriptBox = shadow.getElementById('transcript-box');
   const speedSlider = shadow.getElementById('tts-speed');
   const speedVal = shadow.getElementById('speed-val');
+  const ttsEngineSelect = shadow.getElementById('tts-engine');
   const ttsVoiceSelect = shadow.getElementById('tts-voice');
   const testTtsBtn = shadow.getElementById('test-tts-btn');
 
@@ -455,85 +471,57 @@
   // ── Subtitle-mode TTS (Web Speech API — zero offscreen round-trip) ──────────
   //
   // For subtitle mode we know all text in advance and timestamps are precise.
-  // Using Web Speech API directly in content.js gives <50ms latency vs 200-600ms
-  // when routing through offscreen. Browser caches the voice after first use.
   class SubtitleTTS {
     constructor() {
-      this.voice = null;
       this.enabled = true;
       this.lastSpoken = '';
-      this._init();
-    }
-
-    async _init() {
-      await this._findVoice();
-      if (this.voice) {
-        const primer = new SpeechSynthesisUtterance('\u00a0');
-        primer.volume = 0;
-        primer.voice = this.voice;
-        speechSynthesis.speak(primer);
-      }
-    }
-
-    async _findVoice() {
-      const voices = speechSynthesis.getVoices();
-      const selectedUri = ttsVoice;
-      this.voice = voices.find(v => v.voiceURI === selectedUri || v.name === selectedUri);
-      if (!this.voice && voices.length > 0) {
-        this.voice = voices.find(v => v.lang.startsWith(targetLang)) || voices[0];
-      }
-      console.log(`[SubtitleTTS] Ready: ${this.voice?.name || 'Default'}`);
     }
 
     speak(text) {
       if (!this.enabled || !text?.trim()) return;
 
-      if (speechSynthesis.speaking && text === this.lastSpoken) return;
-
+      if (text === this.lastSpoken) return;
       this.lastSpoken = text;
-      speechSynthesis.cancel();
 
-      // Duck volume for better clarity
-      duckVideoVolume();
-
-      const utt = new SpeechSynthesisUtterance(text);
-      utt.rate = ttsRate;
-      if (this.voice) utt.voice = this.voice;
-
-      const startTime = performance.now();
-
-      utt.onstart = () => {
-        const latency = performance.now() - startTime;
-        console.log(`[SubtitleTTS] 🔊 Speaking (Latency: ${latency.toFixed(0)}ms)`);
-      };
-
-      utt.onend = () => {
+      if (ttsEngine === 'edge') {
+        // Send to background -> offscreen for high-priority streaming TTS (Edge WebSocket)
+        chrome.runtime.sendMessage({
+          type: 'SPEAK_SUBTITLE',
+          text: text,
+          ttsEngine: ttsEngine,
+          ttsRate: ttsRate,
+          ttsVoice: ttsVoice
+        }).catch(err => {
+          console.error('[SubtitleTTS] Failed to send to offscreen:', err);
+        });
+      } else {
+        // Run native browser TTS locally in content.js (avoids offscreen muting policy)
+        speechSynthesis.cancel();
         setTimeout(() => {
-          if (!speechSynthesis.speaking) restoreVideoVolume();
-        }, 300);
-      };
-      utt.onerror = () => restoreVideoVolume();
-
-      // Try-speak logic to overcome browser stalls
-      const doSpeak = (retries = 0) => {
-        if (retries > 2 || !this.enabled) return;
-        speechSynthesis.speak(utt);
-
-        // Increased to 1000ms to give Online voices (like VI) time to update state
-        setTimeout(() => {
-          const isSpeaking = speechSynthesis.speaking;
-          const isPending = speechSynthesis.pending;
+          const utt = new SpeechSynthesisUtterance(text);
+          const voices = speechSynthesis.getVoices();
+          const voiceObj = voices.find(v => v.voiceURI === ttsVoice || v.name === ttsVoice);
           
-          if (!isSpeaking && !isPending && this.enabled) {
-            console.warn(`[SubtitleTTS] Speech stalled (Retrying ${retries + 1}/3)... State: speaking=${isSpeaking}, pending=${isPending}`);
-            doSpeak(retries + 1);
+          if (voiceObj) {
+            utt.voice = voiceObj;
           } else {
-            // Log for debugging state update speed
-            console.log(`[SubtitleTTS] State check at 1000ms: speaking=${isSpeaking}, pending=${isPending}`);
+            utt.lang = 'vi-VN'; // Fallback
           }
-        }, 1000);
-      };
-      doSpeak();
+          
+          utt.rate = ttsRate;
+          
+          // Duck video volume while speaking
+          duckVideoVolume();
+          utt.onend = () => {
+             restoreVideoVolume();
+          };
+          utt.onerror = () => {
+             restoreVideoVolume();
+          };
+          
+          speechSynthesis.speak(utt);
+        }, 50);
+      }
     }
 
     stop() {
@@ -553,8 +541,69 @@
 
     subtitleOverlay = document.createElement('div');
     subtitleOverlay.id = 'vidtrans-subtitle-overlay';
+    
+    // Apply saved position
+    subtitleOverlay.style.left = subtitlePos.left;
+    if (subtitlePos.left === '50%') {
+      subtitleOverlay.style.transform = 'translateX(-50%)';
+    } else {
+      subtitleOverlay.style.transform = 'none';
+    }
 
-    // Style will come from content.css
+    if (subtitlePos.top && subtitlePos.top !== 'auto') {
+      subtitleOverlay.style.top = subtitlePos.top;
+      subtitleOverlay.style.bottom = 'auto';
+    } else {
+      subtitleOverlay.style.bottom = subtitlePos.bottom;
+    }
+
+    // Drag and drop for subtitle overlay
+    let isDraggingSub = false;
+    let startX, startY, startLeft, startBottom, startTop;
+
+    subtitleOverlay.addEventListener('mousedown', (e) => {
+      isDraggingSub = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      
+      const rect = subtitleOverlay.getBoundingClientRect();
+      startLeft = rect.left;
+      startTop = rect.top;
+      
+      subtitleOverlay.style.transition = 'none'; // Disable transition during drag
+      e.preventDefault();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!isDraggingSub) return;
+      
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      
+      const newLeft = startLeft + dx;
+      const newTop = startTop + dy;
+      
+      subtitleOverlay.style.left = `${newLeft}px`;
+      subtitleOverlay.style.top = `${newTop}px`;
+      subtitleOverlay.style.bottom = 'auto';
+      subtitleOverlay.style.transform = 'none';
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isDraggingSub) {
+        isDraggingSub = false;
+        subtitleOverlay.style.transition = 'opacity 0.3s ease';
+        
+        // Save position
+        subtitlePos = {
+          left: subtitleOverlay.style.left,
+          top: subtitleOverlay.style.top,
+          bottom: 'auto'
+        };
+        chrome.storage.local.set({ [SUBTITLE_POS_STORAGE]: subtitlePos });
+      }
+    });
+
     document.body.appendChild(subtitleOverlay);
     return subtitleOverlay;
   }
@@ -696,45 +745,80 @@
   });
 
   // Dynamic Voice List Management
-  function updateVoiceList() {
-    const voices = speechSynthesis.getVoices();
-    const langPrefix = targetLang.split('-')[0];
-
-    // Filter voices by selected target language
-    const filtered = voices.filter(v => v.lang.startsWith(langPrefix));
-
-    if (!ttsVoiceSelect) return; // UI not ready
-    ttsVoiceSelect.innerHTML = '';
-
-    if (filtered.length === 0) {
-      const opt = document.createElement('option');
-      opt.textContent = voices.length === 0 ? 'Đang nạp giọng nói...' : `Không tìm thấy giọng ${langPrefix.toUpperCase()}`;
-      opt.disabled = true;
-      ttsVoiceSelect.appendChild(opt);
-      return;
+  async function updateVoiceList() {
+    if (!ttsVoiceSelect) return;
+    
+    if (ttsEngine === 'native') {
+      ttsVoiceSelect.innerHTML = '<option disabled>Đang nạp giọng Trình duyệt...</option>';
+      const voices = speechSynthesis.getVoices();
+      const langPrefix = targetLang.split('-')[0];
+      const filtered = voices.filter(v => v.lang.startsWith(langPrefix));
+      
+      ttsVoiceSelect.innerHTML = '';
+      if (filtered.length === 0) {
+        const opt = document.createElement('option');
+        opt.textContent = `Không tìm thấy giọng ${langPrefix.toUpperCase()}`;
+        opt.disabled = true;
+        ttsVoiceSelect.appendChild(opt);
+        return;
+      }
+      filtered.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.voiceURI;
+        opt.textContent = v.name;
+        if (v.voiceURI === ttsVoice) opt.selected = true;
+        ttsVoiceSelect.appendChild(opt);
+      });
+    } else {
+      ttsVoiceSelect.innerHTML = '<option disabled>Đang nạp giọng Microsoft...</option>';
+      try {
+        const response = await new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: 'GET_EDGE_VOICES' }, resolve);
+        });
+        const voices = response?.voices || [];
+        const langPrefix = targetLang.split('-')[0]; 
+        const filtered = voices.filter(v => (v.Locale || '').toLowerCase().startsWith(langPrefix.toLowerCase()));
+        ttsVoiceSelect.innerHTML = '';
+        if (filtered.length === 0) {
+          const opt = document.createElement('option');
+          opt.textContent = `Không tìm thấy giọng ${langPrefix.toUpperCase()}`;
+          opt.disabled = true;
+          ttsVoiceSelect.appendChild(opt);
+          return;
+        }
+        filtered.forEach(v => {
+          const opt = document.createElement('option');
+          opt.value = v.ShortName;
+          opt.textContent = `${v.FriendlyName || v.ShortName} (${v.Gender})`;
+          if (v.ShortName === ttsVoice) opt.selected = true;
+          ttsVoiceSelect.appendChild(opt);
+        });
+      } catch (err) {
+        ttsVoiceSelect.innerHTML = '<option disabled>Lỗi tải danh sách giọng</option>';
+      }
     }
-
-    filtered.forEach(v => {
-      const opt = document.createElement('option');
-      opt.value = v.voiceURI;
-      opt.textContent = v.name;
-      if (v.voiceURI === ttsVoice) opt.selected = true;
-      ttsVoiceSelect.appendChild(opt);
-    });
-
-    // Update current ttsVoice if it was empty or not in the new list (safely)
-    const currentStillValid = filtered.find(v => v.voiceURI === ttsVoice);
-    if (!currentStillValid && filtered.length > 0) {
-      ttsVoice = filtered[0].voiceURI;
+    
+    // Auto-select first voice if invalid
+    const currentOpt = Array.from(ttsVoiceSelect.options).find(opt => opt.value === ttsVoice);
+    if (!currentOpt && ttsVoiceSelect.options.length > 0 && !ttsVoiceSelect.options[0].disabled) {
+      ttsVoice = ttsVoiceSelect.options[0].value;
       chrome.storage.local.set({ [TTS_VOICE_STORAGE]: ttsVoice });
+      ttsVoiceSelect.selectedIndex = 0;
+      
+      // Update subtitleTts if active
+      if (typeof subtitleTts !== 'undefined' && subtitleTts) subtitleTts._findVoice();
     }
-
-    if (subtitleTts) subtitleTts._findVoice();
   }
 
-  // Voice loading is async
-  speechSynthesis.onvoiceschanged = updateVoiceList;
-  updateVoiceList(); // Try immediate
+  // Load voices dynamically on init
+  speechSynthesis.onvoiceschanged = () => {
+    if (ttsEngine === 'native') updateVoiceList();
+  };
+  
+  // Trigger fetch
+  speechSynthesis.getVoices();
+  updateVoiceList();
+
 
   // Source language save
   sourceLangSelect.addEventListener('change', async (e) => {
@@ -750,22 +834,35 @@
     await chrome.storage.local.set({ [TTS_RATE_STORAGE]: ttsRate });
   });
 
+  // Engine save
+  ttsEngineSelect.addEventListener('change', async (e) => {
+    ttsEngine = e.target.value;
+    await chrome.storage.local.set({ [TTS_ENGINE_STORAGE]: ttsEngine });
+    updateVoiceList(); // Refresh voice list for new engine
+  });
+
   // Voice save
   ttsVoiceSelect.addEventListener('change', async (e) => {
     ttsVoice = e.target.value;
     await chrome.storage.local.set({ [TTS_VOICE_STORAGE]: ttsVoice });
-    if (subtitleTts) subtitleTts._findVoice();
   });
 
   // Test TTS
   testTtsBtn.addEventListener('click', () => {
     try {
-      chrome.runtime.sendMessage({
-        type: 'TEST_TTS',
-        text: 'Chào bạn, đây là giọng đọc thử nghiệm của hệ thống VidTrans.',
-        ttsRate: ttsRate,
-        ttsVoice: ttsVoice
-      });
+      const testText = 'Chào bạn, đây là giọng đọc thử nghiệm của hệ thống VidTrans.';
+      if (ttsEngine === 'native') {
+        let tempTts = subtitleTts || new SubtitleTTS();
+        tempTts.speak(testText);
+      } else {
+        chrome.runtime.sendMessage({
+          type: 'TEST_TTS',
+          text: testText,
+          ttsEngine: ttsEngine,
+          ttsRate: ttsRate,
+          ttsVoice: ttsVoice
+        });
+      }
     } catch (err) {
       if (err.message.includes('context invalidated')) {
         alert('Extension đã được cập nhật. Vui lòng F5 lại trang YouTube để tiếp tục!');
@@ -822,35 +919,39 @@
       }
 
       if (subs && subs.events && subs.events.length > 0) {
-        log(`[VidTrans] 📝 Found ${subs.events.length} subtitles (${subs.lang}), needsTranslation=${subs.needsTranslation}`);
+        console.log(`[VidTrans] 📝 Found ${subs.events.length} subtitles (${subs.lang}), needsTranslation=${subs.needsTranslation}`);
         mode = 'subtitles';
 
         await startSyncTimer(video, subs);
 
       } else {
-        log('[VidTrans] 🎙️ No subtitles found or timed out, using LIVE MODE');
+        console.log('[VidTrans] 🎙️ No subtitles found or timed out, using LIVE MODE');
         mode = 'live';
+        subtitleTts = new SubtitleTTS();
         chrome.runtime.sendMessage({
           type: 'START_TRANSLATION',
-          targetLang: targetLang, // Renamed from sourceLang
+          apiKey: apiKey,
+          targetLang: targetLang,
+          ttsEngine: ttsEngine,
           ttsRate: ttsRate,
-          ttsVoice: ttsVoice,
-          apiKey: apiKey
+          ttsVoice: ttsVoice
         });
         setStatus('Đang dịch trực tiếp', 'active');
       }
     } catch (err) {
-      logError('[VidTrans] ❌ Error during translation mode startup:', err);
+      console.error('[VidTrans] ❌ Error during translation mode startup:', err);
       setStatus('Lỗi khởi tạo. Chuyển sang Dịch trực tiếp...', 'warning');
 
       // Fallback to Live Mode
       mode = 'live';
+      subtitleTts = new SubtitleTTS();
       chrome.runtime.sendMessage({
         type: 'START_TRANSLATION',
-        targetLang: targetLang, // Renamed from sourceLang
+        apiKey: apiKey,
+        targetLang: targetLang,
+        ttsEngine: ttsEngine,
         ttsRate: ttsRate,
-        ttsVoice: ttsVoice,
-        apiKey: apiKey
+        ttsVoice: ttsVoice
       });
       setStatus('Đang dịch trực tiếp', 'active');
     }
@@ -1059,6 +1160,10 @@ ${numbered}`;
       // Update UI
       addTranscript(original, translated);
       updateSubtitle(original, translated);
+
+      if (ttsEngine === 'native' && subtitleTts && translated) {
+        subtitleTts.speak(translated);
+      }
 
       // Update status
       if (isRunning) {

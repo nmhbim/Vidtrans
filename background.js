@@ -225,23 +225,30 @@ async function generateSecMsGec() {
 
 async function updateEdgeTTSHeaders() {
   const token = await generateSecMsGec();
+  currentEdgeToken = token;
   const muid = generateMuid();
   
   const rules = [
     {
-      id: 1,
+      id: 1001,
       priority: 1,
       action: {
         type: 'modifyHeaders',
         requestHeaders: [
-          { header: 'Origin', operation: 'set', value: `chrome-extension://${chrome.runtime.id}` },
-          { header: 'User-Agent', operation: 'set', value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.3650.75' },
+          { header: 'Origin', operation: 'set', value: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold' },
+          { header: 'User-Agent', operation: 'set', value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.3650.75 Safari/537.36 Edg/143.0.3650.75' },
           { header: 'Sec-MS-GEC', operation: 'set', value: token },
-          { header: 'Sec-MS-GEC-Version', operation: 'set', value: '1-143.0.3650.75' },
-          { header: 'Sec-CH-UA', operation: 'set', value: '"Microsoft Edge";v="143", "Chromium";v="143", "Not?A_Brand";v="99"' },
+          { header: 'Sec-MS-GEC-Version', operation: 'set', value: '1-143.0.3650' },
+          { header: 'Sec-CH-UA', operation: 'set', value: '" Not;A Brand";v="99", "Microsoft Edge";v="143", "Chromium";v="143"' },
           { header: 'Sec-CH-UA-Mobile', operation: 'set', value: '?0' },
           { header: 'Sec-CH-UA-Platform', operation: 'set', value: '"Windows"' },
-          { header: 'Cookie', operation: 'set', value: `muid=${muid};` }
+          { header: 'Sec-WebSocket-Protocol', operation: 'set', value: 'synthesize' },
+          { header: 'Sec-WebSocket-Version', operation: 'set', value: '13' },
+          { header: 'Accept-Encoding', operation: 'set', value: 'gzip, deflate, br, zstd' },
+          { header: 'Accept-Language', operation: 'set', value: 'en-US,en;q=0.9' },
+          { header: 'Cookie', operation: 'set', value: `MUID=${muid}` },
+          { header: 'Pragma', operation: 'set', value: 'no-cache' },
+          { header: 'Cache-Control', operation: 'set', value: 'no-cache' }
         ]
       },
       condition: {
@@ -253,7 +260,7 @@ async function updateEdgeTTSHeaders() {
 
   try {
     await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [1],
+      removeRuleIds: [1, 1001],
       addRules: rules
     });
     console.log('[Background] 🛡️ Edge TTS Headers updated');
@@ -289,10 +296,25 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 // ── Message Routing ────────────────────────────────────────────────────────
 
+let currentEdgeToken = '';
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'STOP_CAPTURE') {
     stopAllCapture();
     sendResponse({ success: true });
+
+  } else if (message.type === 'GET_EDGE_TOKEN') {
+    sendResponse({ token: currentEdgeToken });
+
+  } else if (message.type === 'GET_EDGE_VOICES') {
+    fetch('https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4')
+      .then(res => res.json())
+      .then(data => sendResponse({ voices: data }))
+      .catch(err => {
+        console.error('[Background] Failed to fetch voices:', err);
+        sendResponse({ voices: null, error: err.message });
+      });
+    return true; // Async response
 
   } else if (message.type === 'GET_CAPTURE_STATUS') {
     sendResponse({
@@ -300,7 +322,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId: activeCaptureTabId
     });
 
-  } else if (message.type === 'START_TRANSLATION' || message.type === 'STOP_TRANSLATION') {
+  } else if (['START_TRANSLATION', 'STOP_TRANSLATION', 'SPEAK_SUBTITLE', 'TEST_TTS', 'PROCESS_SUBTITLES'].includes(message.type)) {
     console.log(`[Background] ⚡ Forwarding ${message.type} to offscreen`);
     // Ensure offscreen exists before forwarding
     ensureOffscreenDocument().then(() => {
@@ -323,7 +345,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
-  return true; // Keep message channel open for async response
+  // Only return true if we are returning an async response
+  // The forwarded messages (START_TRANSLATION, etc.) use async sendResponse
+  if (['START_TRANSLATION', 'STOP_TRANSLATION', 'SPEAK_SUBTITLE', 'TEST_TTS', 'PROCESS_SUBTITLES'].includes(message.type)) {
+    return true; 
+  }
+  return false;
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -426,6 +453,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else {
       sendResponse({ url: null });
     }
-    return true;
+    return false; // Sync response
   }
 });
+
+updateEdgeTTSHeaders();
