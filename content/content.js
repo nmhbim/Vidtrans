@@ -501,24 +501,24 @@
           const utt = new SpeechSynthesisUtterance(text);
           const voices = speechSynthesis.getVoices();
           const voiceObj = voices.find(v => v.voiceURI === ttsVoice || v.name === ttsVoice);
-          
+
           if (voiceObj) {
             utt.voice = voiceObj;
           } else {
             utt.lang = 'vi-VN'; // Fallback
           }
-          
+
           utt.rate = ttsRate;
-          
+
           // Duck video volume while speaking
           duckVideoVolume();
           utt.onend = () => {
-             restoreVideoVolume();
+            restoreVideoVolume();
           };
           utt.onerror = () => {
-             restoreVideoVolume();
+            restoreVideoVolume();
           };
-          
+
           speechSynthesis.speak(utt);
         }, 50);
       }
@@ -541,7 +541,7 @@
 
     subtitleOverlay = document.createElement('div');
     subtitleOverlay.id = 'vidtrans-subtitle-overlay';
-    
+
     // Apply saved position
     subtitleOverlay.style.left = subtitlePos.left;
     if (subtitlePos.left === '50%') {
@@ -565,24 +565,24 @@
       isDraggingSub = true;
       startX = e.clientX;
       startY = e.clientY;
-      
+
       const rect = subtitleOverlay.getBoundingClientRect();
       startLeft = rect.left;
       startTop = rect.top;
-      
+
       subtitleOverlay.style.transition = 'none'; // Disable transition during drag
       e.preventDefault();
     });
 
     window.addEventListener('mousemove', (e) => {
       if (!isDraggingSub) return;
-      
+
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
-      
+
       const newLeft = startLeft + dx;
       const newTop = startTop + dy;
-      
+
       subtitleOverlay.style.left = `${newLeft}px`;
       subtitleOverlay.style.top = `${newTop}px`;
       subtitleOverlay.style.bottom = 'auto';
@@ -593,7 +593,7 @@
       if (isDraggingSub) {
         isDraggingSub = false;
         subtitleOverlay.style.transition = 'opacity 0.3s ease';
-        
+
         // Save position
         subtitlePos = {
           left: subtitleOverlay.style.left,
@@ -747,13 +747,13 @@
   // Dynamic Voice List Management
   async function updateVoiceList() {
     if (!ttsVoiceSelect) return;
-    
+
     if (ttsEngine === 'native') {
       ttsVoiceSelect.innerHTML = '<option disabled>Đang nạp giọng Trình duyệt...</option>';
       const voices = speechSynthesis.getVoices();
       const langPrefix = targetLang.split('-')[0];
       const filtered = voices.filter(v => v.lang.startsWith(langPrefix));
-      
+
       ttsVoiceSelect.innerHTML = '';
       if (filtered.length === 0) {
         const opt = document.createElement('option');
@@ -776,8 +776,8 @@
           chrome.runtime.sendMessage({ type: 'GET_EDGE_VOICES' }, resolve);
         });
         const voices = response?.voices || [];
-        const langPrefix = targetLang.split('-')[0].toLowerCase(); 
-        
+        const langPrefix = targetLang.split('-')[0].toLowerCase();
+
         // Lọc giọng: Lấy giọng đúng ngôn ngữ HOẶC giọng Multilingual
         const filtered = voices.filter(v => {
           const locale = (v.Locale || '').toLowerCase();
@@ -816,14 +816,14 @@
         ttsVoiceSelect.innerHTML = '<option disabled>Lỗi tải danh sách giọng</option>';
       }
     }
-    
+
     // Auto-select first voice if invalid
     const currentOpt = Array.from(ttsVoiceSelect.options).find(opt => opt.value === ttsVoice);
     if (!currentOpt && ttsVoiceSelect.options.length > 0 && !ttsVoiceSelect.options[0].disabled) {
       ttsVoice = ttsVoiceSelect.options[0].value;
       chrome.storage.local.set({ [TTS_VOICE_STORAGE]: ttsVoice });
       ttsVoiceSelect.selectedIndex = 0;
-      
+
       // Update subtitleTts if active
       if (typeof subtitleTts !== 'undefined' && subtitleTts) subtitleTts._findVoice();
     }
@@ -833,7 +833,7 @@
   speechSynthesis.onvoiceschanged = () => {
     if (ttsEngine === 'native') updateVoiceList();
   };
-  
+
   // Trigger fetch
   speechSynthesis.getVoices();
   updateVoiceList();
