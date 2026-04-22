@@ -757,8 +757,13 @@
     if (ttsEngine === 'native') {
       ttsVoiceSelect.innerHTML = '<option disabled>Đang nạp giọng Trình duyệt...</option>';
       const voices = speechSynthesis.getVoices();
-      const langPrefix = targetLang.split('-')[0];
-      const filtered = voices.filter(v => v.lang.startsWith(langPrefix));
+      const langPrefix = targetLang.split('-')[0].toLowerCase();
+      
+      const filtered = voices.filter(v => {
+        const lang = (v.lang || '').toLowerCase();
+        const name = (v.name || '').toLowerCase();
+        return lang.startsWith(langPrefix) || name.includes('multilingual');
+      });
 
       ttsVoiceSelect.innerHTML = '';
       if (filtered.length === 0) {
@@ -768,10 +773,22 @@
         ttsVoiceSelect.appendChild(opt);
         return;
       }
+
+      // Sắp xếp: Ưu tiên giọng bản địa lên đầu
+      filtered.sort((a, b) => {
+        const aIsNative = (a.lang || '').toLowerCase().startsWith(langPrefix);
+        const bIsNative = (b.lang || '').toLowerCase().startsWith(langPrefix);
+        if (aIsNative && !bIsNative) return -1;
+        if (!aIsNative && bIsNative) return 1;
+        return 0;
+      });
+
       filtered.forEach(v => {
         const opt = document.createElement('option');
         opt.value = v.voiceURI;
-        opt.textContent = v.name;
+        const isMultilingual = !(v.lang || '').toLowerCase().startsWith(langPrefix);
+        const prefix = isMultilingual ? '🌐 ' : '';
+        opt.textContent = `${prefix}${v.name}`;
         if (v.voiceURI === ttsVoice) opt.selected = true;
         ttsVoiceSelect.appendChild(opt);
       });
@@ -831,7 +848,7 @@
       ttsVoiceSelect.selectedIndex = 0;
 
       // Update subtitleTts if active
-      if (typeof subtitleTts !== 'undefined' && subtitleTts) subtitleTts._findVoice();
+      // (No action needed as speak() uses global ttsVoice variable)
     }
   }
 
