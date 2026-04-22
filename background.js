@@ -187,11 +187,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
 
-  } else if (['UPDATE_TRANSCRIPT', 'UPDATE_TRANSCRIPT_ERROR', 'UPDATE_TRANSCRIPT_STATUS'].includes(message.type)) {
+  } else if (['UPDATE_TRANSCRIPT', 'UPDATE_TRANSCRIPT_ERROR', 'UPDATE_TRANSCRIPT_STATUS', 'TTS_STATE_CHANGED'].includes(message.type)) {
     if (activeCaptureTabId) {
       chrome.tabs.sendMessage(activeCaptureTabId, message).catch(() => {});
     }
   }
+
   return false;
 });
 

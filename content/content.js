@@ -47,25 +47,37 @@
   // ── Audio Ducking ──────────────────────────────────────────────────────────
   /** @type {Map<HTMLVideoElement, number>} */
   const videoVolumeMap = new Map();
+  let duckRefCount = 0;
 
   function duckVideoVolume() {
+    duckRefCount++;
+    console.log('[VidTrans] 🦆 Ducking requested, refCount:', duckRefCount);
+    
     document.querySelectorAll('video').forEach(v => {
       if (!videoVolumeMap.has(v)) {
         videoVolumeMap.set(v, v.volume);
       }
-      v.volume = Math.max(v.volume * 0.2, 0.05);
+      // Target 10% of original volume, minimum 0.05
+      v.volume = Math.max(v.volume * 0.1, 0.05);
     });
   }
 
   function restoreVideoVolume() {
-    videoVolumeMap.forEach((origVol, v) => {
-      if (!v.paused && !v.ended) {
-        v.volume = origVol;
-      }
-    });
-    // Clear after short delay
-    setTimeout(() => videoVolumeMap.clear(), 1000);
+    duckRefCount = Math.max(0, duckRefCount - 1);
+    console.log('[VidTrans] 🦆 Restore requested, refCount:', duckRefCount);
+
+    if (duckRefCount === 0) {
+      videoVolumeMap.forEach((origVol, v) => {
+        try {
+          if (v && !v.paused && !v.ended) {
+            v.volume = origVol;
+          }
+        } catch (e) {}
+      });
+      videoVolumeMap.clear();
+    }
   }
+
 
   // ── Create Container ────────────────────────────────────────────────────────
   let container = document.getElementById('vidtrans-root');
@@ -479,12 +491,12 @@
 
     speak(text) {
       if (!this.enabled || !text?.trim()) return;
-
       if (text === this.lastSpoken) return;
       this.lastSpoken = text;
 
       if (ttsEngine === 'edge') {
-        // Send to background -> offscreen for high-priority streaming TTS (Edge WebSocket)
+        // Send to background -> offscreen for streaming TTS (Edge WebSocket)
+        // Ducking will be triggered by TTS_STATE_CHANGED message from offscreen.js
         chrome.runtime.sendMessage({
           type: 'SPEAK_SUBTITLE',
           text: text,
@@ -495,29 +507,22 @@
           console.error('[SubtitleTTS] Failed to send to offscreen:', err);
         });
       } else {
-        // Run native browser TTS locally in content.js (avoids offscreen muting policy)
+        // Run native browser TTS locally in content.js
         speechSynthesis.cancel();
         setTimeout(() => {
           const utt = new SpeechSynthesisUtterance(text);
           const voices = speechSynthesis.getVoices();
           const voiceObj = voices.find(v => v.voiceURI === ttsVoice || v.name === ttsVoice);
 
-          if (voiceObj) {
-            utt.voice = voiceObj;
-          } else {
-            utt.lang = 'vi-VN'; // Fallback
-          }
+          if (voiceObj) utt.voice = voiceObj;
+          else utt.lang = 'vi-VN'; 
 
           utt.rate = ttsRate;
 
-          // Duck video volume while speaking
-          duckVideoVolume();
-          utt.onend = () => {
-            restoreVideoVolume();
-          };
-          utt.onerror = () => {
-            restoreVideoVolume();
-          };
+          // Standard ducking trigger for local engine
+          utt.onstart = () => duckVideoVolume();
+          utt.onend = () => restoreVideoVolume();
+          utt.onerror = () => restoreVideoVolume();
 
           speechSynthesis.speak(utt);
         }, 50);
@@ -530,6 +535,7 @@
       restoreVideoVolume();
     }
   }
+
 
   let subtitleTts = null;
 

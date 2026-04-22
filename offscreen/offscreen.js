@@ -450,6 +450,18 @@ const engines = {
   'edge': new EdgeTTS()
 };
 
+// Standardize ducking across all engines
+Object.values(engines).forEach(engine => {
+  engine.onStart = () => {
+    log(`[Offscreen] 🦆 Ducking started (Engine: ${engine.id})`);
+    chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: true }).catch(() => {});
+  };
+  engine.onEnd = () => {
+    log(`[Offscreen] 🦆 Ducking ended (Engine: ${engine.id})`);
+    chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: false }).catch(() => {});
+  };
+});
+
 let currentEngine = null;
 
 function stopCurrentTts() {
@@ -469,9 +481,6 @@ function addToTtsQueue(text) {
 async function playNextInTtsQueue() {
   if (ttsQueue.length === 0) {
     isPlayingTts = false;
-    if (isTranslating) {
-      chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: false }).catch(() => {});
-    }
     return;
   }
 
@@ -481,9 +490,6 @@ async function playNextInTtsQueue() {
   try {
     // Determine engine to use from global ttsEngine variable (default 'edge')
     currentEngine = engines[ttsEngine] || engines['edge'];
-
-    // Tell content script to duck volume
-    chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: true }).catch(() => {});
 
     log(`[Offscreen] 🔊 Speaking using ${currentEngine.name}: "${text.substring(0, 30)}..."`);
     
@@ -514,8 +520,18 @@ function playNativeTts(text, voice) {
     const utt = new SpeechSynthesisUtterance(text);
     utt.voice = voice;
     utt.rate = ttsRate;
-    utt.onend = () => resolve(true);
-    utt.onerror = () => resolve(false);
+    
+    // Native TTS here should also trigger ducking if called directly
+    chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: true }).catch(() => {});
+    
+    utt.onend = () => {
+      chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: false }).catch(() => {});
+      resolve(true);
+    };
+    utt.onerror = () => {
+      chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: false }).catch(() => {});
+      resolve(false);
+    };
     speechSynthesis.speak(utt);
   });
 }
@@ -526,35 +542,15 @@ function playNativeTts(text, voice) {
 function fallbackToDefaultTTS(text) {
   log('[Offscreen] 🔄 Using browser default TTS fallback');
   
-  // Ensure volume is ducked for fallback too
-  chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: true }).catch(() => {});
-
-  const utt = new SpeechSynthesisUtterance(text);
-  utt.lang = 'vi-VN';
-  utt.rate = ttsRate;
-
-  // Try to find a matching voice (Male/Female)
-  const voices = speechSynthesis.getVoices();
-  const isMale = edgeTts.voice.toLowerCase().includes('nam');
-  
-  const targetVoice = voices.find(v => 
-    v.lang.startsWith('vi') && 
-    (isMale ? (v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('nam')) : true)
-  );
-
-  if (targetVoice) {
-    log(`[Offscreen] 🎤 Selected fallback voice: ${targetVoice.name}`);
-    utt.voice = targetVoice;
-  }
-  
-  utt.onend = () => playNextInTtsQueue();
-  utt.onerror = (e) => {
-    logError('[Offscreen] ❌ Fallback TTS error:', e);
+  // Use NativeTTS engine for fallback to maintain callback consistency
+  engines['native'].speak(text, ttsRate, '').then(() => {
     playNextInTtsQueue();
-  };
-  
-  speechSynthesis.speak(utt);
+  }).catch(err => {
+    logError('[Offscreen] ❌ Fallback TTS error:', err);
+    playNextInTtsQueue();
+  });
 }
+
 
 /**
  * @param {string} message
