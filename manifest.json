@@ -34,7 +34,8 @@
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://* wss://*"
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "content_scripts": [{
     "matches": [

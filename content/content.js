@@ -776,8 +776,15 @@
           chrome.runtime.sendMessage({ type: 'GET_EDGE_VOICES' }, resolve);
         });
         const voices = response?.voices || [];
-        const langPrefix = targetLang.split('-')[0]; 
-        const filtered = voices.filter(v => (v.Locale || '').toLowerCase().startsWith(langPrefix.toLowerCase()));
+        const langPrefix = targetLang.split('-')[0].toLowerCase(); 
+        
+        // Lọc giọng: Lấy giọng đúng ngôn ngữ HOẶC giọng Multilingual
+        const filtered = voices.filter(v => {
+          const locale = (v.Locale || '').toLowerCase();
+          const name = (v.FriendlyName || v.ShortName || '').toLowerCase();
+          return locale.startsWith(langPrefix) || name.includes('multilingual');
+        });
+
         ttsVoiceSelect.innerHTML = '';
         if (filtered.length === 0) {
           const opt = document.createElement('option');
@@ -786,10 +793,22 @@
           ttsVoiceSelect.appendChild(opt);
           return;
         }
+
+        // Sắp xếp: Ưu tiên giọng bản địa lên đầu, giọng Multilingual xuống dưới
+        filtered.sort((a, b) => {
+          const aIsNative = a.Locale.toLowerCase().startsWith(langPrefix);
+          const bIsNative = b.Locale.toLowerCase().startsWith(langPrefix);
+          if (aIsNative && !bIsNative) return -1;
+          if (!aIsNative && bIsNative) return 1;
+          return 0;
+        });
+
         filtered.forEach(v => {
           const opt = document.createElement('option');
           opt.value = v.ShortName;
-          opt.textContent = `${v.FriendlyName || v.ShortName} (${v.Gender})`;
+          const isMultilingual = !(v.Locale || '').toLowerCase().startsWith(langPrefix);
+          const prefix = isMultilingual ? '🌐 ' : '';
+          opt.textContent = `${prefix}${v.FriendlyName || v.ShortName} (${v.Gender})`;
           if (v.ShortName === ttsVoice) opt.selected = true;
           ttsVoiceSelect.appendChild(opt);
         });

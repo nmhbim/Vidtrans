@@ -2,7 +2,8 @@
 // Audio capture + STT/Translation pipeline — runs in hidden Offscreen Document
 
 import { GroqClient } from '../lib/groq-api.js';
-import { EdgeTTS } from '../lib/edge-tts.js';
+import { NativeTTS } from '../lib/tts-engines/native-tts.js';
+import { EdgeTTS } from '../lib/tts-engines/edge-tts.js';
 // Utils now loaded via script tag in offscreen.html
 
 const CHUNK_INTERVAL_MS = 6000; // Better context with 6s chunks
@@ -97,8 +98,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     
     if (msg.text && msg.text.trim()) {
       log(`[Offscreen] 📝 Text: "${msg.text.substring(0, 50)}..."`);
-      stopCurrentTts();
-      ttsQueue.length = 0;
       addToTtsQueue(msg.text);
     }
     sendResponse({ success: true });
@@ -443,8 +442,8 @@ async function processAudioChunk(audioBlob) {
 
 // ── Message Helpers ─────────────────────────────────────────────────────────
 
-import { NativeTTS } from '../lib/tts-engines/native-tts.js';
-import { EdgeTTS } from '../lib/tts-engines/edge-tts.js';
+
+
 
 const engines = {
   'native': new NativeTTS(),
@@ -502,7 +501,13 @@ async function playNextInTtsQueue() {
       message: `TTS Error: ${errMsg}`,
       isError: true
     }).catch(() => {});
-    
+    playNextInTtsQueue();
+  }
+}
+
+/**
+ * @param {string} text
+ * @param {SpeechSynthesisVoice} voice
  */
 function playNativeTts(text, voice) {
   return new Promise((resolve) => {
