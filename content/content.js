@@ -52,13 +52,13 @@
   function duckVideoVolume() {
     duckRefCount++;
     console.log('[VidTrans] 🦆 Ducking requested, refCount:', duckRefCount);
-    
+
     document.querySelectorAll('video').forEach(v => {
       if (!videoVolumeMap.has(v)) {
         videoVolumeMap.set(v, v.volume);
       }
       // Target 10% of original volume, minimum 0.05
-      v.volume = Math.max(v.volume * 0.1, 0.05);
+      v.volume = Math.max(v.volume * 0.3, 0.05);
     });
   }
 
@@ -72,7 +72,7 @@
           if (v && !v.paused && !v.ended) {
             v.volume = origVol;
           }
-        } catch (e) {}
+        } catch (e) { }
       });
       videoVolumeMap.clear();
     }
@@ -392,12 +392,32 @@
           <select id="source-lang">
             <option value="vi" ${targetLang === 'vi' ? 'selected' : ''}>Tiếng Việt</option>
             <option value="en" ${targetLang === 'en' ? 'selected' : ''}>English</option>
-            <option value="ja" ${targetLang === 'ja' ? 'selected' : ''}>日本語 (Nhật)</option>
-            <option value="ko" ${targetLang === 'ko' ? 'selected' : ''}>한국어 (Hàn)</option>
-            <option value="zh" ${targetLang === 'zh' ? 'selected' : ''}>中文 (Trung)</option>
-            <option value="fr" ${targetLang === 'fr' ? 'selected' : ''}>Français (Pháp)</option>
-            <option value="de" ${targetLang === 'de' ? 'selected' : ''}>Deutsch (Đức)</option>
-            <option value="es" ${targetLang === 'es' ? 'selected' : ''}>Español (Tây)</option>
+            <option value="zh" ${targetLang === 'zh' ? 'selected' : ''}>中文 (Chinese)</option>
+            <option value="ja" ${targetLang === 'ja' ? 'selected' : ''}>日本語 (Japanese)</option>
+            <option value="ko" ${targetLang === 'ko' ? 'selected' : ''}>한국어 (Korean)</option>
+            <option value="fr" ${targetLang === 'fr' ? 'selected' : ''}>Français (French)</option>
+            <option value="de" ${targetLang === 'de' ? 'selected' : ''}>Deutsch (German)</option>
+            <option value="es" ${targetLang === 'es' ? 'selected' : ''}>Español (Spanish)</option>
+            <option value="ru" ${targetLang === 'ru' ? 'selected' : ''}>Русский (Russian)</option>
+            <option value="it" ${targetLang === 'it' ? 'selected' : ''}>Italiano (Italian)</option>
+            <option value="pt" ${targetLang === 'pt' ? 'selected' : ''}>Português (Portuguese)</option>
+            <option value="th" ${targetLang === 'th' ? 'selected' : ''}>ไทย (Thai)</option>
+            <option value="id" ${targetLang === 'id' ? 'selected' : ''}>Bahasa Indonesia</option>
+            <option value="ms" ${targetLang === 'ms' ? 'selected' : ''}>Bahasa Melayu</option>
+            <option value="tl" ${targetLang === 'tl' ? 'selected' : ''}>Filipino</option>
+            <option value="hi" ${targetLang === 'hi' ? 'selected' : ''}>हिन्दी (Hindi)</option>
+            <option value="ar" ${targetLang === 'ar' ? 'selected' : ''}>العربية (Arabic)</option>
+            <option value="tr" ${targetLang === 'tr' ? 'selected' : ''}>Türkçe (Turkish)</option>
+            <option value="nl" ${targetLang === 'nl' ? 'selected' : ''}>Nederlands (Dutch)</option>
+            <option value="pl" ${targetLang === 'pl' ? 'selected' : ''}>Polski (Polish)</option>
+            <option value="sv" ${targetLang === 'sv' ? 'selected' : ''}>Svenska (Swedish)</option>
+            <option value="da" ${targetLang === 'da' ? 'selected' : ''}>Dansk (Danish)</option>
+            <option value="fi" ${targetLang === 'fi' ? 'selected' : ''}>Suomi (Finnish)</option>
+            <option value="el" ${targetLang === 'el' ? 'selected' : ''}>Ελληνικά (Greek)</option>
+            <option value="cs" ${targetLang === 'cs' ? 'selected' : ''}>Čeština (Czech)</option>
+            <option value="hu" ${targetLang === 'hu' ? 'selected' : ''}>Magyar (Hungarian)</option>
+            <option value="ro" ${targetLang === 'ro' ? 'selected' : ''}>Română (Romanian)</option>
+            <option value="uk" ${targetLang === 'uk' ? 'selected' : ''}>Українська (Ukrainian)</option>
           </select>
         </div>
 
@@ -515,7 +535,7 @@
           const voiceObj = voices.find(v => v.voiceURI === ttsVoice || v.name === ttsVoice);
 
           if (voiceObj) utt.voice = voiceObj;
-          else utt.lang = 'vi-VN'; 
+          else utt.lang = 'vi-VN';
 
           utt.rate = ttsRate;
 
@@ -758,7 +778,7 @@
       ttsVoiceSelect.innerHTML = '<option disabled>Đang nạp giọng Trình duyệt...</option>';
       const voices = speechSynthesis.getVoices();
       const langPrefix = targetLang.split('-')[0].toLowerCase();
-      
+
       const filtered = voices.filter(v => {
         const lang = (v.lang || '').toLowerCase();
         const name = (v.name || '').toLowerCase();
@@ -1001,8 +1021,12 @@
 
   // ── Groq Batch Translate ───────────────────────────────────────────────────
   const LANG_NAMES = {
-    vi: 'Vietnamese', en: 'English', ja: 'Japanese', ko: 'Korean',
-    zh: 'Chinese', fr: 'French', de: 'German', es: 'Spanish',
+    vi: 'Vietnamese', en: 'English', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
+    fr: 'French', de: 'German', es: 'Spanish', ru: 'Russian', it: 'Italian',
+    pt: 'Portuguese', th: 'Thai', id: 'Indonesian', ms: 'Malay', tl: 'Filipino',
+    hi: 'Hindi', ar: 'Arabic', tr: 'Turkish', nl: 'Dutch', pl: 'Polish',
+    sv: 'Swedish', da: 'Danish', fi: 'Finnish', el: 'Greek', cs: 'Czech',
+    hu: 'Hungarian', ro: 'Romanian', uk: 'Ukrainian'
   };
   const CHUNK_SIZE = 50; // Lines per API call — stays well within token limits
 

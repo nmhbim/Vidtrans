@@ -24,6 +24,12 @@ let groqClient = null;
 
 /** @type {string} */
 let currentSourceLang = 'en-US';
+
+/** @type {string} */
+let apiKey = '';
+
+/** @type {string} */
+let targetLang = 'vi';
 // TTS Queue state
 let ttsQueue = [];
 let isPlayingTts = false;
@@ -80,8 +86,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     ttsRate = msg.ttsRate || 1.3;
     if (msg.ttsVoice) ttsVoice = msg.ttsVoice;
     if (msg.ttsEngine) ttsEngine = msg.ttsEngine;
+    if (msg.targetLang) targetLang = msg.targetLang;
     
-    groqClient = new GroqClient(msg.apiKey);
+    groqClient = new GroqClient(msg.apiKey, targetLang);
     isTranslating = true;
     handleProcessSubtitles(msg.subtitles, msg.subLang);
     sendResponse({ success: true });
@@ -211,7 +218,7 @@ async function startTranslation(apiKeyFromMessage) {
 
     log('[Offscreen] ✅ API Key ready, initializing GroqClient');
     try {
-      groqClient = new GroqClient(apiKey);
+      groqClient = new GroqClient(apiKey, targetLang);
     } catch (err) {
       sendError(`API Key không hợp lệ: ${err.message}`);
       return;
@@ -247,6 +254,10 @@ function stopTranslation() {
 
   mediaRecorder = null;
   groqClient = null;
+
+  // Clear TTS queue and stop current playback
+  ttsQueue = [];
+  stopCurrentTts();
 
   log('[Offscreen] Translation stopped');
 }
@@ -395,9 +406,9 @@ async function processAudioChunk(audioBlob) {
 
     log(`[Offscreen] 📝 STT: "${originalText}"`);
 
-    // 2. Translate to Vietnamese with Context
+    // 2. Translate to Target Language with Context
     const contextStr = translationContext.length > 0 ? `\nContext (Last few sentences): ${translationContext.join(' | ')}` : '';
-    const prompt = `Translate this speech to Vietnamese. Stay consistent with the provided context. Speak naturally.\n\n${contextStr}\n\nCurrent Speech: "${originalText}"`;
+    const prompt = `Translate this speech to language code: ${targetLang}. Stay consistent with the provided context. Speak naturally.\n\n${contextStr}\n\nCurrent Speech: "${originalText}"`;
     
     const translatedText = await groqClient.translate(prompt);
 
@@ -406,7 +417,7 @@ async function processAudioChunk(audioBlob) {
       return;
     }
 
-    log(`[Offscreen] 🇻🇳 VI: "${translatedText}"`);
+    log(`[Offscreen] 🌐 [${targetLang.toUpperCase()}]: "${translatedText}"`);
 
     // Update context
     translationContext.push(translatedText);
@@ -662,10 +673,10 @@ async function processSubtitleItem(sub, index) {
     let translated = sub.translated;
     
     if (!translated) {
-      const isVietnamese = currentSubLang && (currentSubLang.startsWith('vi') || currentSubLang.includes('vietnamese'));
+      const isTargetLang = currentSubLang && (currentSubLang.startsWith(targetLang) || currentSubLang.toLowerCase().includes(targetLang));
       
-      if (isVietnamese) {
-        log('[Offscreen] 🇻🇳 Subtitle already in Vietnamese, skipping translation.');
+      if (isTargetLang) {
+        log(`[Offscreen] 🌐 Subtitle already in target language (${targetLang}), skipping translation.`);
         translated = sub.text;
       } else if (groqClient) {
         translated = await groqClient.translateWithRetry(sub.text, currentSourceLang);
