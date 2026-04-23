@@ -14,9 +14,9 @@
   font-weight: 600;
   text-align: center;
 
-  /* Fixed width for consistent 2-line layout */
-  width: 1200px;
-  max-width: 95vw;
+  /* Dynamically set to 1/3 of screen width */
+  width: 33.33vw;
+  max-width: 33.33vw;
 
   cursor: move;
   pointer-events: auto;

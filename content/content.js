@@ -594,11 +594,22 @@
   let subtitlePaginator = null;
 
   function ensurePaginator() {
+    // Dynamically calculate chars per line based on actual overlay width or screen width
+    // Average char width at 24px font size is roughly 12px. Padding is 56px (28px * 2).
+    const overlayWidth = subtitleOverlay ? subtitleOverlay.clientWidth : (window.innerWidth / 3);
+    // Ensure we have at least 30 chars per line even on very small screens
+    const estimatedCharsPerLine = Math.max(30, Math.floor((overlayWidth - 56) / 12));
+
     if (!subtitlePaginator && window.SubtitlePaginator) {
       subtitlePaginator = new window.SubtitlePaginator({
         maxLines: 2,
-        charsPerLine: 100,
+        charsPerLine: estimatedCharsPerLine,
       });
+    } else if (subtitlePaginator) {
+      // Update dynamically if overlay was resized significantly
+      if (Math.abs(subtitlePaginator.charsPerLine - estimatedCharsPerLine) > 5) {
+        subtitlePaginator.charsPerLine = estimatedCharsPerLine;
+      }
     }
     return subtitlePaginator;
   }
