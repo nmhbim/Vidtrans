@@ -163,6 +163,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ success: true });
       break;
 
+    case 'PAUSE_TTS':
+      ttsController.pause();
+      sendResponse({ success: true });
+      break;
+
+    case 'RESUME_TTS':
+      ttsController.resume();
+      sendResponse({ success: true });
+      break;
+
     case 'STOP_OFFSCREEN_CAPTURE':
       log('[Offscreen] 🛑 Stopping all capture...');
       stopCapture();

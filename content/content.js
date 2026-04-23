@@ -583,6 +583,22 @@
       restoreVideoVolume();
       this._lastSpoken = '';
     }
+
+    pause() {
+      if (ttsEngine === 'edge') {
+        chrome.runtime.sendMessage({ type: 'PAUSE_TTS' }).catch(() => {});
+      } else {
+        speechSynthesis.pause();
+      }
+    }
+
+    resume() {
+      if (ttsEngine === 'edge') {
+        chrome.runtime.sendMessage({ type: 'RESUME_TTS' }).catch(() => {});
+      } else {
+        speechSynthesis.resume();
+      }
+    }
   }
 
   let ttsBridge = null;
@@ -1068,6 +1084,8 @@
 
   // ── Translation Control ────────────────────────────────────────────────────
 
+  let playerAdapter = null;
+
   async function startTranslationMode() {
     const video = document.querySelector('video');
     if (!video) {
@@ -1075,6 +1093,19 @@
       isRunning = false;
       updateToggleButton();
       return;
+    }
+
+    // Initialize player adapter for synchronized control
+    if (playerAdapter) playerAdapter.destroy();
+    if (window.YouTubeAdapter) {
+      playerAdapter = new window.YouTubeAdapter(video);
+      playerAdapter.onStateChange = (state) => {
+        if (!ttsBridge) return;
+        if (state === 'pause') ttsBridge.pause();
+        if (state === 'play') ttsBridge.resume();
+        if (state === 'seeking') ttsBridge.pause(); // Pause while seeking
+      };
+      playerAdapter.bindEvents();
     }
 
     try {
@@ -1364,6 +1395,7 @@ ${numbered}`;
     if (subtitleSync) { subtitleSync.stop(); subtitleSync = null; }
     if (ttsBridge) { ttsBridge.stop(); ttsBridge = null; }
     if (subtitlePaginator) { subtitlePaginator.clear(); }
+    if (playerAdapter) { playerAdapter.destroy(); playerAdapter = null; }
 
     chrome.runtime.sendMessage({ type: 'STOP_TRANSLATION' });
     setStatus('Sẵn sàng');

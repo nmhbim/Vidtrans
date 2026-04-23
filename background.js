@@ -230,6 +230,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'TEST_TTS':
     case 'PRERENDER_SUBTITLES':
     case 'PLAY_PRERENDERED':
+    case 'PAUSE_TTS':
+    case 'RESUME_TTS':
       ensureOffscreenDocument().then(() => {
         sendToOffscreen(message).then(() => sendResponse({ success: true }));
       });

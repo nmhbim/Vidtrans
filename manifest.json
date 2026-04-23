@@ -57,6 +57,8 @@
       "lib/subtitle-fetcher.js",
       "lib/subtitle-paginator.js",
       "lib/subtitle-sync.js",
+      "lib/player-adapter.js",
+      "lib/adapters/youtube-adapter.js",
       "content/content.js"
     ],
     "css": ["content/content.css"],
