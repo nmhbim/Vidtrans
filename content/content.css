@@ -56,3 +56,11 @@
   display: block;
   letter-spacing: 2px;
 }
+
+/* Karaoke highlight effect */
+#vidtrans-subtitle-overlay .vidtrans-karaoke-word {
+  color: #ffeb3b; /* Vibrant yellow */
+  text-shadow: 0 0 10px rgba(255, 235, 59, 0.8);
+  font-weight: 700;
+  transition: color 0.1s ease, text-shadow 0.1s ease;
+}

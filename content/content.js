@@ -731,10 +731,19 @@
    * @param {string} originalText - Original text
    * @param {string} indicator    - Page indicator (e.g. "1/3") or empty
    */
-  function renderSubtitlePage(pageText, originalText, indicator) {
+  function renderSubtitlePage(pageText, originalText, indicator, highlightWord = null) {
     if (!subtitleOverlay) return;
 
-    let html = `<span class="vidtrans-subtitle-text">${escapeHtml(pageText)}</span>`;
+    let escapedPageText = escapeHtml(pageText);
+    
+    // Apply karaoke highlight if a word is actively being spoken
+    if (highlightWord) {
+      const safeWord = escapeHtml(highlightWord).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(${safeWord})`, 'i');
+      escapedPageText = escapedPageText.replace(regex, `<span class="vidtrans-karaoke-word">$1</span>`);
+    }
+
+    let html = `<span class="vidtrans-subtitle-text">${escapedPageText}</span>`;
 
     if (originalText) {
       html += `<span class="vidtrans-subtitle-original">${escapeHtml(originalText)}</span>`;
@@ -755,13 +764,14 @@
    */
   function handleWordBoundary(data) {
     const paginator = ensurePaginator();
-    if (!paginator || !paginator.needsPagination) return;
+    if (!paginator) return;
 
+    // We still want to handle word boundaries even if pagination isn't needed (for karaoke effect)
     const result = paginator.onWordBoundary(data.textOffset);
-    if (result.changed) {
-      const indicator = result.totalPages > 1 ? `${result.pageIndex + 1}/${result.totalPages}` : '';
-      renderSubtitlePage(result.page, paginator.originalText, indicator);
-    }
+    const indicator = result.totalPages > 1 ? `${result.pageIndex + 1}/${result.totalPages}` : '';
+    
+    // Always re-render to update the karaoke highlight
+    renderSubtitlePage(result.page, paginator.originalText, indicator, data.word);
   }
 
   function escapeHtml(text) {
