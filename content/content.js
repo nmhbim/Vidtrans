@@ -11,14 +11,15 @@
   window.__vidtrans_injected__ = true;
   console.log('[VidTrans] 🚀 Content script initializing...');
 
-  // ── Storage Keys ───────────────────────────────────────────────────────────
-  const API_KEY_STORAGE = 'vidtrans_groq_key';
-  const SOURCE_LANG_STORAGE = 'vidtrans_source_lang';
-  const PANEL_POS_STORAGE = 'vidtrans_panel_pos';
-  const TTS_RATE_STORAGE = 'vidtrans_tts_rate';
-  const TTS_VOICE_STORAGE = 'vidtrans_tts_voice';
-  const TTS_ENGINE_STORAGE = 'vidtrans_tts_engine';
-  const SUBTITLE_POS_STORAGE = 'vidtrans_subtitle_pos';
+  // ── Storage Keys (from lib/constants.js) ────────────────────────────────────
+  const SK = window.STORAGE_KEYS || {};
+  const API_KEY_STORAGE = SK.API_KEY || 'vidtrans_groq_key';
+  const SOURCE_LANG_STORAGE = SK.SOURCE_LANG || 'vidtrans_source_lang';
+  const PANEL_POS_STORAGE = SK.PANEL_POS || 'vidtrans_panel_pos';
+  const TTS_RATE_STORAGE = SK.TTS_RATE || 'vidtrans_tts_rate';
+  const TTS_VOICE_STORAGE = SK.TTS_VOICE || 'vidtrans_tts_voice';
+  const TTS_ENGINE_STORAGE = SK.TTS_ENGINE || 'vidtrans_tts_engine';
+  const SUBTITLE_POS_STORAGE = SK.SUBTITLE_POS || 'vidtrans_subtitle_pos';
 
   // ── Load State ─────────────────────────────────────────────────────────────
   let apiKey = '';
@@ -500,67 +501,107 @@
   let mode = 'live'; // 'live' or 'subtitles'
   let syncTimer = null;
 
-  // ── Subtitle-mode TTS (Web Speech API — zero offscreen round-trip) ──────────
+  // ── TTS Bridge (unified interface for all engines) ─────────────────────────
   //
-  // For subtitle mode we know all text in advance and timestamps are precise.
-  class SubtitleTTS {
+  // Edge TTS → routes to offscreen (WebSocket streaming)
+  // Native TTS → plays locally in content.js (lower latency)
+  //
+  // Both engines emit word boundary events for subtitle pagination:
+  //   Edge TTS  → TTS_WORD_BOUNDARY message from offscreen
+  //   Native TTS → SpeechSynthesisUtterance.onboundary (local)
+  //
+  // This is the ONLY place in content.js that handles TTS playback.
+  class TTSBridge {
     constructor() {
-      this.enabled = true;
-      this.lastSpoken = '';
+      this._enabled = true;
+      this._lastSpoken = '';
     }
 
+    /**
+     * Speak text using the currently selected engine.
+     * @param {string} text
+     */
     speak(text) {
-      if (!this.enabled || !text?.trim()) return;
-      if (text === this.lastSpoken) return;
-      this.lastSpoken = text;
+      if (!this._enabled || !text?.trim()) return;
+      if (text === this._lastSpoken) return;
+      this._lastSpoken = text;
 
       if (ttsEngine === 'edge') {
-        // Send to background -> offscreen for streaming TTS (Edge WebSocket)
-        // Ducking will be triggered by TTS_STATE_CHANGED message from offscreen.js
+        // Edge TTS plays in offscreen via WebSocket.
+        // Ducking is triggered by TTS_STATE_CHANGED message from offscreen.
         chrome.runtime.sendMessage({
           type: 'SPEAK_SUBTITLE',
-          text: text,
-          ttsEngine: ttsEngine,
-          ttsRate: ttsRate,
-          ttsVoice: ttsVoice
-        }).catch(err => {
-          console.error('[SubtitleTTS] Failed to send to offscreen:', err);
-        });
+          text, ttsEngine, ttsRate, ttsVoice
+        }).catch(err => console.error('[TTSBridge] Send failed:', err));
       } else {
-        // Run native browser TTS locally in content.js
-        speechSynthesis.cancel();
-        setTimeout(() => {
-          const utt = new SpeechSynthesisUtterance(text);
-          const voices = speechSynthesis.getVoices();
-          const voiceObj = voices.find(v => v.voiceURI === ttsVoice || v.name === ttsVoice);
-
-          if (voiceObj) utt.voice = voiceObj;
-          else utt.lang = 'vi-VN';
-
-          utt.rate = ttsRate;
-
-          // Standard ducking trigger for local engine
-          utt.onstart = () => duckVideoVolume();
-          utt.onend = () => restoreVideoVolume();
-          utt.onerror = () => restoreVideoVolume();
-
-          speechSynthesis.speak(utt);
-        }, 50);
+        this._playNative(text);
       }
     }
 
+    /**
+     * Play text using browser SpeechSynthesis (native engine).
+     * Emits word boundary events locally for subtitle pagination.
+     * @param {string} text
+     */
+    _playNative(text) {
+      speechSynthesis.cancel();
+      setTimeout(() => {
+        const utt = new SpeechSynthesisUtterance(text);
+        const voices = speechSynthesis.getVoices();
+        const voiceObj = voices.find(v => v.voiceURI === ttsVoice || v.name === ttsVoice);
+
+        if (voiceObj) utt.voice = voiceObj;
+        else utt.lang = 'vi-VN';
+
+        utt.rate = ttsRate;
+        utt.onstart = () => duckVideoVolume();
+        utt.onend = () => restoreVideoVolume();
+        utt.onerror = () => restoreVideoVolume();
+
+        // Word boundary → drive subtitle pagination (same as Edge TTS)
+        utt.onboundary = (event) => {
+          if (event.name === 'word') {
+            handleWordBoundary({
+              textOffset: event.charIndex,
+              textLength: event.charLength || 0,
+              word: text.substring(event.charIndex, event.charIndex + (event.charLength || 1)),
+              fullText: text,
+            });
+          }
+        };
+
+        speechSynthesis.speak(utt);
+      }, 50);
+    }
+
+    /**
+     * Stop all playback and disable further speech.
+     */
     stop() {
-      this.enabled = false;
+      this._enabled = false;
       speechSynthesis.cancel();
       restoreVideoVolume();
+      this._lastSpoken = '';
     }
   }
 
+  let ttsBridge = null;
 
-  let subtitleTts = null;
-
-  // ── Subtitle Overlay ───────────────────────────────────────────────────────
+  // ── Subtitle Overlay + Paginator ──────────────────────────────────────────
   let subtitleOverlay = null;
+
+  /** @type {SubtitlePaginator|null} */
+  let subtitlePaginator = null;
+
+  function ensurePaginator() {
+    if (!subtitlePaginator && window.SubtitlePaginator) {
+      subtitlePaginator = new window.SubtitlePaginator({
+        maxLines: 2,
+        charsPerLine: 45,
+      });
+    }
+    return subtitlePaginator;
+  }
 
   function createSubtitleOverlay() {
     if (subtitleOverlay) return subtitleOverlay;
@@ -640,19 +681,76 @@
       subtitleOverlay.remove();
       subtitleOverlay = null;
     }
+    if (subtitlePaginator) {
+      subtitlePaginator.clear();
+    }
   }
 
+  /**
+   * Update the subtitle overlay with paginated text.
+   * Shows only the current 2-line page. Pages advance via word boundary events.
+   *
+   * @param {string} originalText  - Original (untranslated) text
+   * @param {string} translatedText - Translated text to display
+   */
   function updateSubtitle(originalText, translatedText) {
     if (!subtitleOverlay) {
       createSubtitleOverlay();
     }
 
-    subtitleOverlay.innerHTML = `
-      <span class="vidtrans-subtitle-text">${escapeHtml(translatedText)}</span>
-      ${originalText ? `<span class="vidtrans-subtitle-original">${escapeHtml(originalText)}</span>` : ''}
-    `;
+    const paginator = ensurePaginator();
+    if (paginator) {
+      const result = paginator.setText(translatedText, originalText);
+      const indicator = result.totalPages > 1 ? `${result.pageIndex + 1}/${result.totalPages}` : '';
+      renderSubtitlePage(result.page, originalText, indicator);
+    } else {
+      // Fallback: show the whole text at once
+      subtitleOverlay.innerHTML = `
+        <span class="vidtrans-subtitle-text">${escapeHtml(translatedText)}</span>
+        ${originalText ? `<span class="vidtrans-subtitle-original">${escapeHtml(originalText)}</span>` : ''}
+      `;
+    }
 
     subtitleOverlay.classList.remove('vidtrans-hidden');
+  }
+
+  /**
+   * Render a single page of subtitle text into the overlay.
+   * @param {string} pageText     - Current page content (may contain \n for line breaks)
+   * @param {string} originalText - Original text
+   * @param {string} indicator    - Page indicator (e.g. "1/3") or empty
+   */
+  function renderSubtitlePage(pageText, originalText, indicator) {
+    if (!subtitleOverlay) return;
+
+    let html = `<span class="vidtrans-subtitle-text">${escapeHtml(pageText)}</span>`;
+
+    if (originalText) {
+      html += `<span class="vidtrans-subtitle-original">${escapeHtml(originalText)}</span>`;
+    }
+
+    if (indicator) {
+      // html += `<span class="vidtrans-subtitle-page-indicator">${escapeHtml(indicator)}</span>`;
+    }
+
+    subtitleOverlay.innerHTML = html;
+  }
+
+  /**
+   * Handle word boundary events from both Edge TTS (via message) and Native TTS (via onboundary).
+   * Advances the paginator page when the reading position crosses a page boundary.
+   *
+   * @param {{ textOffset: number, fullText: string, word?: string, textLength?: number }} data
+   */
+  function handleWordBoundary(data) {
+    const paginator = ensurePaginator();
+    if (!paginator || !paginator.needsPagination) return;
+
+    const result = paginator.onWordBoundary(data.textOffset);
+    if (result.changed) {
+      const indicator = result.totalPages > 1 ? `${result.pageIndex + 1}/${result.totalPages}` : '';
+      renderSubtitlePage(result.page, paginator.originalText, indicator);
+    }
   }
 
   function escapeHtml(text) {
@@ -867,7 +965,7 @@
       chrome.storage.local.set({ [TTS_VOICE_STORAGE]: ttsVoice });
       ttsVoiceSelect.selectedIndex = 0;
 
-      // Update subtitleTts if active
+      // TTSBridge reads global ttsVoice, no extra action needed
       // (No action needed as speak() uses global ttsVoice variable)
     }
   }
@@ -914,7 +1012,7 @@
     try {
       const testText = 'Chào bạn, đây là giọng đọc thử nghiệm của hệ thống VidTrans.';
       if (ttsEngine === 'native') {
-        let tempTts = subtitleTts || new SubtitleTTS();
+        let tempTts = ttsBridge || new TTSBridge();
         tempTts.speak(testText);
       } else {
         chrome.runtime.sendMessage({
@@ -989,7 +1087,7 @@
       } else {
         console.log('[VidTrans] 🎙️ No subtitles found or timed out, using LIVE MODE');
         mode = 'live';
-        subtitleTts = new SubtitleTTS();
+        ttsBridge = new TTSBridge();
         chrome.runtime.sendMessage({
           type: 'START_TRANSLATION',
           apiKey: apiKey,
@@ -1006,7 +1104,7 @@
 
       // Fallback to Live Mode
       mode = 'live';
-      subtitleTts = new SubtitleTTS();
+      ttsBridge = new TTSBridge();
       chrome.runtime.sendMessage({
         type: 'START_TRANSLATION',
         apiKey: apiKey,
@@ -1020,14 +1118,7 @@
   }
 
   // ── Groq Batch Translate ───────────────────────────────────────────────────
-  const LANG_NAMES = {
-    vi: 'Vietnamese', en: 'English', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
-    fr: 'French', de: 'German', es: 'Spanish', ru: 'Russian', it: 'Italian',
-    pt: 'Portuguese', th: 'Thai', id: 'Indonesian', ms: 'Malay', tl: 'Filipino',
-    hi: 'Hindi', ar: 'Arabic', tr: 'Turkish', nl: 'Dutch', pl: 'Polish',
-    sv: 'Swedish', da: 'Danish', fi: 'Finnish', el: 'Greek', cs: 'Czech',
-    hu: 'Hungarian', ro: 'Romanian', uk: 'Ukrainian'
-  };
+  // LANG_NAMES loaded from lib/constants.js (window.LANG_NAMES)
   const CHUNK_SIZE = 50; // Lines per API call — stays well within token limits
 
   async function translateChunk(texts, langName) {
@@ -1134,26 +1225,87 @@ ${numbered}`;
     }));
     console.table(debugData);
 
-    subtitleTts = new SubtitleTTS();
+    ttsBridge = new TTSBridge();
+
+    // ── Pre-render configuration (Edge TTS only) ──────────────────────────
+    const usePrerender = ttsEngine === 'edge';
+    const LOOKAHEAD = 5;
+
+    if (usePrerender) {
+      // Pre-render the first batch immediately so the first few subtitles
+      // have zero latency when playback starts
+      const initialTexts = events.slice(0, LOOKAHEAD).map(e => e.translated || e.text).filter(t => t?.trim());
+      if (initialTexts.length > 0) {
+        console.log(`[VidTrans] 📦 Pre-rendering first ${initialTexts.length} subtitles...`);
+        setStatus(`Pre-rendering ${initialTexts.length} câu đầu...`, 'warning');
+        try {
+          chrome.runtime.sendMessage({
+            type: 'PRERENDER_SUBTITLES',
+            texts: initialTexts,
+            ttsEngine, ttsRate, ttsVoice
+          });
+        } catch (err) {
+          console.error('[VidTrans] Initial pre-render send failed:', err);
+        }
+      }
+    }
+
+    const prerenderOptions = usePrerender ? {
+      lookahead: LOOKAHEAD,
+
+      // Called when SubtitleSync detects upcoming events to pre-render
+      onPrerender: (texts) => {
+        console.log(`[VidTrans] 📦 Lookahead: pre-rendering ${texts.length} upcoming subtitles`);
+        try {
+          chrome.runtime.sendMessage({
+            type: 'PRERENDER_SUBTITLES',
+            texts,
+            ttsEngine, ttsRate, ttsVoice
+          });
+        } catch (err) {
+          console.error('[VidTrans] Pre-render send failed:', err);
+        }
+      },
+
+      // Called to play the current subtitle — uses pre-rendered cache
+      onPlayPrerendered: (text) => {
+        try {
+          chrome.runtime.sendMessage({
+            type: 'PLAY_PRERENDERED',
+            text,
+            ttsEngine, ttsRate, ttsVoice
+          }).catch(err => console.error('[VidTrans] Play prerendered failed:', err));
+        } catch (err) {
+          // Fallback to normal speak
+          ttsBridge.speak(text);
+        }
+      }
+    } : {};
 
     subtitleSync.start(
       video,
       (displayText, originalText) => {
         updateSubtitle(originalText, displayText);
         addTranscript(originalText || displayText, displayText);
-        // 🔊 Speak directly — no offscreen round-trip, <50ms latency
-        subtitleTts.speak(displayText);
+
+        // For native TTS (no pre-render), speak directly
+        if (!usePrerender) {
+          ttsBridge.speak(displayText);
+        }
+        // For Edge TTS with pre-render, playback is handled by onPlayPrerendered
       },
       () => {
         if (subtitleOverlay) subtitleOverlay.classList.add('vidtrans-hidden');
-      }
+      },
+      prerenderOptions
     );
 
     const label = subs.needsTranslation
       ? `Phụ đề (${subs.lang.toUpperCase()}) → đã dịch`
       : `Phụ đề native (${subs.lang.toUpperCase()})`;
-    setStatus(label, 'active');
-    console.log('[VidTrans] ▶ SubtitleSync started —', label);
+    const prerenderLabel = usePrerender ? ' (pre-render ⚡)' : '';
+    setStatus(label + prerenderLabel, 'active');
+    console.log('[VidTrans] ▶ SubtitleSync started —', label + prerenderLabel);
   }
 
 
@@ -1189,7 +1341,8 @@ ${numbered}`;
     updateToggleButton();
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
     if (subtitleSync) { subtitleSync.stop(); subtitleSync = null; }
-    if (subtitleTts) { subtitleTts.stop(); subtitleTts = null; }
+    if (ttsBridge) { ttsBridge.stop(); ttsBridge = null; }
+    if (subtitlePaginator) { subtitlePaginator.clear(); }
 
     chrome.runtime.sendMessage({ type: 'STOP_TRANSLATION' });
     setStatus('Sẵn sàng');
@@ -1223,12 +1376,15 @@ ${numbered}`;
     } else if (msg.type === 'UPDATE_TRANSCRIPT') {
       const { original, translated } = msg;
 
-      // Update UI
-      addTranscript(original, translated);
-      updateSubtitle(original, translated);
+      // Normalize text for perfect sync (matching Edge TTS normalization)
+      const normalizedTranslated = translated.replace(/\.\.+/g, '.').replace(/\. /g, ', ').trim();
 
-      if (ttsEngine === 'native' && subtitleTts && translated) {
-        subtitleTts.speak(translated);
+      // Update UI
+      addTranscript(original, normalizedTranslated);
+      updateSubtitle(original, normalizedTranslated);
+
+      if (ttsEngine === 'native' && ttsBridge && normalizedTranslated) {
+        ttsBridge.speak(normalizedTranslated);
       }
 
       // Update status
@@ -1241,6 +1397,8 @@ ${numbered}`;
       } else {
         restoreVideoVolume();
       }
+    } else if (msg.type === 'TTS_WORD_BOUNDARY') {
+      handleWordBoundary(msg);
     } else if (msg.type === 'UPDATE_TRANSCRIPT_ERROR') {
       addStatusMessage(msg.message, msg.isError);
 
@@ -1252,6 +1410,12 @@ ${numbered}`;
 
     } else if (msg.type === 'UPDATE_TRANSCRIPT_STATUS') {
       setStatus(msg.message, 'active');
+
+    } else if (msg.type === 'PRERENDER_COMPLETE') {
+      console.log(`[VidTrans] ✅ Pre-render complete: ${msg.count}/${msg.total} (cache: ${msg.stats?.size || 0})`);
+      if (isRunning && mode === 'subtitles') {
+        setStatus(`Phụ đề (pre-render: ${msg.stats?.size || 0} cached) ⚡`, 'active');
+      }
 
     } else if (msg.type === 'CHECK_UI') {
       // Background checking if UI exists — respond ok

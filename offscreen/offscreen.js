@@ -2,9 +2,8 @@
 // Audio capture + STT/Translation pipeline — runs in hidden Offscreen Document
 
 import { GroqClient } from '../lib/groq-api.js';
-import { NativeTTS } from '../lib/tts-engines/native-tts.js';
-import { EdgeTTS } from '../lib/tts-engines/edge-tts.js';
-// Utils now loaded via script tag in offscreen.html
+import { TTSController } from '../lib/tts-controller.js';
+// Utils + Constants loaded via script tags in offscreen.html
 
 const CHUNK_INTERVAL_MS = 6000; // Better context with 6s chunks
 
@@ -30,98 +29,160 @@ let apiKey = '';
 
 /** @type {string} */
 let targetLang = 'vi';
-// TTS Queue state
-let ttsQueue = [];
-let isPlayingTts = false;
 
 /** @type {boolean} */
 let isTranslating = false;
-let translationContext = []; // Store last 3 translations for context
-let subtitleTimeline = []; // { startMs, durationMs, text, translated }
-let lastPlayedSubIndex = -1;
 
-/** @type {number} */
-let ttsRate = 1.0;
-
-/** @type {string} */
-let ttsVoice = 'vi-VN-HoaiMyNeural';
-
-/** @type {string} */
-let ttsEngine = 'edge'; // 'edge' or 'native'
+/** @type {string[]} */
+let translationContext = []; // Last 3 translations for context
 
 /** @type {string|null} */
 let activeStreamId = null;
+
+/** @type {string|null} */
 let currentSubLang = null;
 
-/** @type {HTMLAudioElement|null} */
-let currentAudio = null;
-/** @type {WebSocket|null} */
-let currentWs = null;
+// ── Subtitle Mode State ─────────────────────────────────────────────────────
+
+let subtitleTimeline = []; // { start, duration, text, translated }
+let lastPlayedSubIndex = -1;
+
+// ── TTS Controller (single source of truth) ─────────────────────────────────
+
+const ttsController = new TTSController({
+  onPlaybackStart: () => {
+    log('[Offscreen] 🦆 Ducking started');
+    sendMessage({ type: 'TTS_STATE_CHANGED', playing: true });
+  },
+  onPlaybackEnd: () => {
+    log('[Offscreen] 🦆 Ducking ended');
+    sendMessage({ type: 'TTS_STATE_CHANGED', playing: false });
+  },
+  onError: (errMsg) => {
+    sendMessage({
+      type: 'UPDATE_TRANSCRIPT_ERROR',
+      message: `TTS Error: ${errMsg}`,
+      isError: true
+    });
+  }
+});
+
+// Wire up word boundary tracking (Edge TTS)
+ttsController.setWordBoundaryListener((wb, audio) => {
+  sendMessage({
+    type: 'TTS_WORD_BOUNDARY',
+    word: wb.text,
+    offsetMs: wb.offsetMs,
+    durationMs: wb.durationMs,
+    textOffset: wb.textOffset,
+    textLength: wb.textLength,
+    // Full text being spoken — needed for subtitle pagination
+    fullText: ttsController.currentText,
+    // Current audio playback position for sync
+    audioTimeMs: audio ? audio.currentTime * 1000 : 0,
+  });
+});
 
 // ── Message Listener ─────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  log('[Offscreen] 📥 Received message:', msg.type);
-  if (msg.type === 'CONSUME_STREAM') {
-    handleConsumeStream(msg.streamId, msg.tabId);
-    sendResponse({ success: true });
+  log('[Offscreen] 📥 Received:', msg.type);
 
-  } else if (msg.type === 'START_TRANSLATION') {
-    log('[Offscreen] ⚡ Starting translation (LIVE MODE)...');
-    apiKey = msg.apiKey;
-    targetLang = msg.targetLang || 'vi'; // Sync with content.js rename
-    ttsRate = msg.ttsRate || 1.3;
-    if (msg.ttsVoice) ttsVoice = msg.ttsVoice;
-    if (msg.ttsEngine) ttsEngine = msg.ttsEngine;
-    
-    subtitleTimeline = []; 
-    lastPlayedSubIndex = -1;
-    
-    startTranslation(apiKey); 
-    sendResponse({ success: true });
+  switch (msg.type) {
+    case 'CONSUME_STREAM':
+      handleConsumeStream(msg.streamId, msg.tabId);
+      sendResponse({ success: true });
+      break;
 
-  } else if (msg.type === 'PROCESS_SUBTITLES') {
-    log('[Offscreen] ⚡ Processing subtitles (SUBTITLE MODE)...');
-    currentSourceLang = msg.sourceLang || 'en-US';
-    ttsRate = msg.ttsRate || 1.3;
-    if (msg.ttsVoice) ttsVoice = msg.ttsVoice;
-    if (msg.ttsEngine) ttsEngine = msg.ttsEngine;
-    if (msg.targetLang) targetLang = msg.targetLang;
-    
-    groqClient = new GroqClient(msg.apiKey, targetLang);
-    isTranslating = true;
-    handleProcessSubtitles(msg.subtitles, msg.subLang);
-    sendResponse({ success: true });
+    case 'START_TRANSLATION':
+      log('[Offscreen] ⚡ Starting translation (LIVE MODE)...');
+      apiKey = msg.apiKey;
+      targetLang = msg.targetLang || 'vi';
+      syncTtsSettings(msg);
+      subtitleTimeline = [];
+      lastPlayedSubIndex = -1;
+      startTranslation(apiKey);
+      sendResponse({ success: true });
+      break;
 
-  } else if (msg.type === 'SYNC_TIME') {
-    handleSyncTime(msg.currentTimeMs);
+    case 'STOP_TRANSLATION':
+      log('[Offscreen] 🛑 Stopping translation...');
+      stopTranslation();
+      sendResponse({ success: true });
+      break;
 
-  } else if (['START_TRANSLATION', 'STOP_TRANSLATION', 'SPEAK_SUBTITLE', 'TEST_TTS'].includes(msg.type)) {
-    log(`[Offscreen] ⚡ TTS Command: ${msg.type} | Engine: ${msg.ttsEngine} | Voice: ${msg.ttsVoice} | Rate: ${msg.ttsRate}`);
-    
-    if (msg.ttsRate) ttsRate = msg.ttsRate;
-    if (msg.ttsVoice) ttsVoice = msg.ttsVoice;
-    if (msg.ttsEngine) ttsEngine = msg.ttsEngine;
-    
-    if (msg.text && msg.text.trim()) {
-      log(`[Offscreen] 📝 Text: "${msg.text.substring(0, 50)}..."`);
-      addToTtsQueue(msg.text);
-    }
-    sendResponse({ success: true });
+    case 'PROCESS_SUBTITLES':
+      log('[Offscreen] ⚡ Processing subtitles (SUBTITLE MODE)...');
+      currentSourceLang = msg.sourceLang || 'en-US';
+      if (msg.targetLang) targetLang = msg.targetLang;
+      syncTtsSettings(msg);
+      groqClient = new GroqClient(msg.apiKey, targetLang);
+      isTranslating = true;
+      handleProcessSubtitles(msg.subtitles, msg.subLang);
+      sendResponse({ success: true });
+      break;
 
+    case 'SYNC_TIME':
+      handleSyncTime(msg.currentTimeMs);
+      break;
 
-  } else if (msg.type === 'STOP_TRANSLATION') {
-    log('[Offscreen] 🛑 Stopping translation...');
-    stopTranslation();
-    sendResponse({ success: true });
+    case 'SPEAK_SUBTITLE':
+    case 'TEST_TTS':
+      syncTtsSettings(msg);
+      if (msg.text?.trim()) {
+        log(`[Offscreen] 📝 TTS: "${msg.text.substring(0, 50)}..."`);
+        ttsController.enqueue(msg.text);
+      }
+      sendResponse({ success: true });
+      break;
 
-  } else if (msg.type === 'STOP_OFFSCREEN_CAPTURE') {
-    log('[Offscreen] 🛑 Stopping all capture...');
-    stopCapture();
+    // ── Pre-render for subtitle mode ──────────────────────────────────────
+    case 'PRERENDER_SUBTITLES':
+      syncTtsSettings(msg);
+      if (msg.texts?.length > 0) {
+        log(`[Offscreen] 📦 Pre-rendering ${msg.texts.length} subtitles...`);
+        ttsController.prerenderBatch(msg.texts).then(count => {
+          log(`[Offscreen] ✅ Pre-rendered ${count}/${msg.texts.length}`);
+          sendMessage({
+            type: 'PRERENDER_COMPLETE',
+            count,
+            total: msg.texts.length,
+            stats: ttsController.getCacheStats()
+          });
+        });
+      }
+      sendResponse({ success: true });
+      break;
+
+    case 'PLAY_PRERENDERED':
+      syncTtsSettings(msg);
+      if (msg.text?.trim()) {
+        log(`[Offscreen] ⚡ Play pre-rendered: "${msg.text.substring(0, 50)}..."`);
+        ttsController.playPrerendered(msg.text);
+      }
+      sendResponse({ success: true });
+      break;
+
+    case 'STOP_OFFSCREEN_CAPTURE':
+      log('[Offscreen] 🛑 Stopping all capture...');
+      stopCapture();
+      break;
   }
 
   return true;
 });
+
+// ── TTS Settings Helper ─────────────────────────────────────────────────────
+
+/**
+ * Sync TTS settings from a message to the controller.
+ * @param {Object} msg
+ */
+function syncTtsSettings(msg) {
+  if (msg.ttsRate) ttsController.setRate(msg.ttsRate);
+  if (msg.ttsVoice) ttsController.setVoice(msg.ttsVoice);
+  if (msg.ttsEngine) ttsController.setEngine(msg.ttsEngine);
+}
 
 // ── Audio Capture ────────────────────────────────────────────────────────────
 
@@ -133,16 +194,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 async function handleConsumeStream(streamId, _tabId) {
   if (activeStreamId === streamId) {
     log('[Offscreen] StreamId already active, skipping');
-    return; // Already capturing
+    return;
   }
 
-  // Stop any existing capture first
   if (mediaStream) {
     stopCapture();
   }
 
   try {
-    log('[Offscreen] 🎙️ Requesting MediaStream with streamId:', streamId.substring(0, 20) + '...');
+    log('[Offscreen] 🎙️ Requesting MediaStream...');
     sendStatus('Đang khởi tạo luồng âm thanh...');
 
     mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -156,18 +216,17 @@ async function handleConsumeStream(streamId, _tabId) {
     });
 
     activeStreamId = streamId;
-    log('[Offscreen] ✅ MediaStream obtained successfully');
+    log('[Offscreen] ✅ MediaStream obtained');
     sendStatus('Sẵn sàng phiên dịch');
 
-    // Passthrough audio (keeps video playing while we record)
+    // Passthrough audio so the video keeps playing
     audioContext = new AudioContext();
     const sourceNode = audioContext.createMediaStreamSource(mediaStream);
     sourceNode.connect(audioContext.destination);
 
     log('[Offscreen] 🔊 Audio passthrough active');
-
   } catch (err) {
-    logError('[Offscreen] ❌ Failed to get MediaStream:', err.message);
+    logError('[Offscreen] ❌ MediaStream failed:', err.message);
     sendError(`Lỗi âm thanh: ${err.message}`);
     activeStreamId = null;
   }
@@ -177,11 +236,11 @@ async function handleConsumeStream(streamId, _tabId) {
 
 /**
  * Start the recording → STT → translate loop
- * @param {string} [apiKeyFromMessage] - API Key provided in the message
+ * @param {string} [apiKeyFromMessage]
  */
 async function startTranslation(apiKeyFromMessage) {
   log('[Offscreen] 🚀 Entering startTranslation...');
-  
+
   try {
     if (!mediaStream) {
       logError('[Offscreen] ❌ No MediaStream — call CONSUME_STREAM first');
@@ -194,23 +253,22 @@ async function startTranslation(apiKeyFromMessage) {
       return;
     }
 
-    // Use API key from message (robust) or fallback to storage (if available)
-    let apiKey = apiKeyFromMessage;
-
-    if (!apiKey) {
+    // Resolve API key
+    let key = apiKeyFromMessage;
+    if (!key) {
       log('[Offscreen] 🔑 Key not in message, trying storage fallback...');
       try {
         if (chrome.storage) {
           const storageArea = chrome.storage.session || chrome.storage.local;
           const state = await storageArea.get('vidtrans_groq_key');
-          apiKey = state.vidtrans_groq_key;
+          key = state.vidtrans_groq_key;
         }
       } catch (e) {
         logError('[Offscreen] Storage fallback failed:', e);
       }
     }
 
-    if (!apiKey) {
+    if (!key) {
       logError('[Offscreen] ❌ API Key not found');
       sendError('Chưa nhập Groq API Key hoặc lỗi truyền key.');
       return;
@@ -218,7 +276,7 @@ async function startTranslation(apiKeyFromMessage) {
 
     log('[Offscreen] ✅ API Key ready, initializing GroqClient');
     try {
-      groqClient = new GroqClient(apiKey, targetLang);
+      groqClient = new GroqClient(key, targetLang);
     } catch (err) {
       sendError(`API Key không hợp lệ: ${err.message}`);
       return;
@@ -227,7 +285,6 @@ async function startTranslation(apiKeyFromMessage) {
     isTranslating = true;
     sendStatus('Đang phiên dịch...');
     log('[Offscreen] ✅ Translation loop starting...');
-
     recordNextChunk();
   } catch (err) {
     logError('[Offscreen] ❌ startTranslation crash:', err.message);
@@ -236,50 +293,49 @@ async function startTranslation(apiKeyFromMessage) {
 }
 
 /**
- * Stop translation and cleanup recorder
+ * Stop translation and clean up.
  */
 function stopTranslation() {
-  if (!isTranslating) return;
+  // ⚡ ALWAYS stop TTS — even if isTranslating is false.
+  // In subtitle pre-render mode, PLAY_PRERENDERED runs without
+  // setting isTranslating, so we must stop TTS unconditionally.
+  ttsController.stop();
+
+  if (!isTranslating) {
+    log('[Offscreen] TTS stopped (was not translating)');
+    return;
+  }
 
   isTranslating = false;
   sendStatus('Đã dừng phiên dịch');
 
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    try {
-      mediaRecorder.stop();
-    } catch (err) {
-      // Ignore if already stopped
-    }
+    try { mediaRecorder.stop(); } catch (err) {}
   }
-
   mediaRecorder = null;
   groqClient = null;
+  translationContext = [];
 
-  // Clear TTS queue and stop current playback
-  ttsQueue = [];
-  stopCurrentTts();
-
-  log('[Offscreen] Translation stopped');
+  log('[Offscreen] Translation stopped (cache preserved)');
 }
 
+// ── Audio Recording ──────────────────────────────────────────────────────────
+
 /**
- * Record one audio chunk, then schedule the next
+ * Record one audio chunk, then schedule the next.
  */
 function recordNextChunk() {
   if (!isTranslating || !mediaStream) return;
 
   const mimeType = getBestMimeType();
-
   if (!mimeType) {
-    logError('[Offscreen] No supported MIME type for MediaRecorder');
+    logError('[Offscreen] No supported MIME type');
     sendError('Trình duyệt không hỗ trợ ghi âm. Thử dùng Chrome.');
     return;
   }
 
-  const options = { mimeType };
-
   try {
-    mediaRecorder = new MediaRecorder(mediaStream, options);
+    mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
   } catch (err) {
     logError('[Offscreen] MediaRecorder init failed:', err.message);
     sendError('Lỗi ghi âm. Trình duyệt có thể không hỗ trợ.');
@@ -290,28 +346,23 @@ function recordNextChunk() {
   let chunkBlobs = [];
 
   mediaRecorder.ondataavailable = (event) => {
-    if (event.data && event.data.size > 0) {
+    if (event.data?.size > 0) {
       chunkBlobs.push(event.data);
     }
   };
 
   mediaRecorder.onstop = async () => {
     if (!isTranslating) return;
-    if (chunkBlobs.length === 0) {
-      recordNextChunk();
-      return;
-    }
+    if (chunkBlobs.length === 0) { recordNextChunk(); return; }
 
-    // Combine all blobs from this chunk period
-    const audioBlob = new Blob(chunkBlobs, { type: mimeType || 'audio/webm' });
+    const audioBlob = new Blob(chunkBlobs, { type: mimeType });
     chunkBlobs = [];
 
-    // Process async (don't wait — schedule next recording immediately)
+    // Process async, don't block next recording
     processAudioChunk(audioBlob).catch(err => {
       logError('[Offscreen] processAudioChunk error:', err.message);
     });
 
-    // Schedule next chunk immediately
     recordNextChunk();
   };
 
@@ -320,11 +371,9 @@ function recordNextChunk() {
     stopTranslation();
   };
 
-  // Start recording
-  mediaRecorder.start(); 
-  log(`[Offscreen] 🎙️ Recorder started (5s chunk...)`);
+  mediaRecorder.start();
+  log(`[Offscreen] 🎙️ Recorder started (${CHUNK_INTERVAL_MS / 1000}s chunk...)`);
 
-  // Stop and process after interval
   setTimeout(() => {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.stop();
@@ -332,73 +381,67 @@ function recordNextChunk() {
   }, CHUNK_INTERVAL_MS);
 }
 
+// ── Audio Processing ────────────────────────────────────────────────────────
+
 /**
- * STT → Translate → Send to UI
+ * Check if audio blob is essentially silence.
  * @param {Blob} audioBlob
- */
-/**
- * Check if the audio blob is essentially silence
- * @param {Blob} audioBlob 
  * @returns {Promise<boolean>}
  */
 async function isSilence(audioBlob) {
   try {
     const arrayBuffer = await audioBlob.arrayBuffer();
-    // We need a temporary context to decode
     const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
     const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
-    
+
     const channelData = audioBuffer.getChannelData(0);
     let sum = 0;
     for (let i = 0; i < channelData.length; i++) {
       sum += Math.abs(channelData[i]);
     }
     const average = sum / channelData.length;
-    
-    // Close context to free memory
-    tempCtx.close();
 
-    log(`[Offscreen] 🔊 Audio energy level: ${(average * 100).toFixed(3)}%`);
-    
-    // Threshold: 0.005 (0.5%) is usually a good "is something being said" limit
+    tempCtx.close();
+    log(`[Offscreen] 🔊 Audio energy: ${(average * 100).toFixed(3)}%`);
     return average < 0.005;
   } catch (err) {
     logError('[Offscreen] Silence check error:', err);
-    return false; // Assume not silence if check fails
+    return false;
   }
 }
 
+/**
+ * STT → Translate → Dispatch to UI + TTS
+ * @param {Blob} audioBlob
+ */
 async function processAudioChunk(audioBlob) {
   if (!groqClient || !isTranslating) return;
 
   try {
-    // 0. Silence detection (VAD)
-    const silent = await isSilence(audioBlob);
-    if (silent) {
-      log('[Offscreen] 🤫 Silence detected, skipping AI processing');
+    // 0. Silence detection
+    if (await isSilence(audioBlob)) {
+      log('[Offscreen] 🤫 Silence detected, skipping');
       return;
     }
 
-    log(`[Offscreen] 🧠 Processing audio chunk (${(audioBlob.size / 1024).toFixed(1)} KB)...`);
-    
-    // 1. Speech-to-Text with Groq Whisper
+    log(`[Offscreen] 🧠 Processing chunk (${(audioBlob.size / 1024).toFixed(1)} KB)...`);
+
+    // 1. STT
     const originalText = await groqClient.transcribe(audioBlob);
-
     if (!originalText || originalText.trim().length < 2) {
-      log('[Offscreen] 🙊 No speech detected in chunk');
+      log('[Offscreen] 🙊 No speech detected');
       return;
     }
 
-    // --- Hallucination Filter ---
+    // 2. Hallucination filter
     const lowerText = originalText.toLowerCase().trim().replace(/[.,!?;]/g, '');
     const hallucinations = [
-      'thank you', 'thanks for watching', 'please subscribe', 
+      'thank you', 'thanks for watching', 'please subscribe',
       'subscribe to my channel', 'thanks for listening',
       'cảm ơn', 'cảm ơn bạn đã xem', 'hẹn gặp lại',
       'you', 'i', 'me', 'the', 'a', 'it', 'yeah', 'um', 'uh'
     ];
-    
-    // If the text is JUST one of these common hallucinations, skip it
+
     if (hallucinations.includes(lowerText)) {
       log('[Offscreen] 🚫 Hallucination filtered:', originalText);
       return;
@@ -406,12 +449,13 @@ async function processAudioChunk(audioBlob) {
 
     log(`[Offscreen] 📝 STT: "${originalText}"`);
 
-    // 2. Translate to Target Language with Context
-    const contextStr = translationContext.length > 0 ? `\nContext (Last few sentences): ${translationContext.join(' | ')}` : '';
+    // 3. Translate
+    const contextStr = translationContext.length > 0
+      ? `\nContext (Last few sentences): ${translationContext.join(' | ')}`
+      : '';
     const prompt = `Translate this speech to language code: ${targetLang}. Stay consistent with the provided context. Speak naturally.\n\n${contextStr}\n\nCurrent Speech: "${originalText}"`;
-    
-    const translatedText = await groqClient.translate(prompt);
 
+    const translatedText = await groqClient.translate(prompt);
     if (!translatedText) {
       log('[Offscreen] ❓ Translation empty, skipping');
       return;
@@ -419,178 +463,126 @@ async function processAudioChunk(audioBlob) {
 
     log(`[Offscreen] 🌐 [${targetLang.toUpperCase()}]: "${translatedText}"`);
 
-    // Update context
+    // Update context window
     translationContext.push(translatedText);
     if (translationContext.length > 3) translationContext.shift();
 
-    // 3. Send to UI
-    chrome.runtime.sendMessage({
+    // 4. Send to UI
+    sendMessage({
       type: 'UPDATE_TRANSCRIPT',
       original: originalText,
       translated: translatedText
-    }).catch(() => {});
+    });
 
-    // 4. Add to TTS Queue (only if not native, since content.js handles native directly)
-    if (ttsEngine !== 'native') {
-      addToTtsQueue(translatedText);
+    // 5. Queue TTS (Edge engine plays here; Native TTS plays in content.js)
+    if (ttsController.engineId !== 'native') {
+      ttsController.enqueue(translatedText);
     }
 
   } catch (err) {
     logError('[Offscreen] ❌ Pipeline error:', err.message);
-    // ... rest of error handling ...
 
     if (err.message.includes('Invalid API Key')) {
       sendError('API Key không hợp lệ. Kiểm tra lại trong cài đặt.');
       stopTranslation();
     } else if (err.message.includes('429') || err.message.includes('rate limit')) {
       sendError('Groq rate limit — đợi một chút...');
-      // Wait and try again with next chunk
     } else {
       sendError(`Lỗi: ${err.message}`);
     }
   }
 }
 
-// ── Message Helpers ─────────────────────────────────────────────────────────
+// ── Subtitle Mode ───────────────────────────────────────────────────────────
 
-
-
-
-const engines = {
-  'native': new NativeTTS(),
-  'edge': new EdgeTTS()
-};
-
-// Standardize ducking across all engines
-Object.values(engines).forEach(engine => {
-  engine.onStart = () => {
-    log(`[Offscreen] 🦆 Ducking started (Engine: ${engine.id})`);
-    chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: true }).catch(() => {});
-  };
-  engine.onEnd = () => {
-    log(`[Offscreen] 🦆 Ducking ended (Engine: ${engine.id})`);
-    chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: false }).catch(() => {});
-  };
-});
-
-let currentEngine = null;
-
-function stopCurrentTts() {
-  if (currentEngine) {
-    currentEngine.stop();
-  }
-  isPlayingTts = false;
+/**
+ * Handle PROCESS_SUBTITLES message.
+ * @param {Array} subs
+ * @param {string} subLang
+ */
+async function handleProcessSubtitles(subs, subLang) {
+  log(`[Offscreen] 📦 Processing ${subs.length} subtitles (Lang: ${subLang})...`);
+  subtitleTimeline = subs;
+  currentSubLang = subLang;
+  lastPlayedSubIndex = -1;
+  sendStatus(`Đã tải ${subs.length} phụ đề. Đang đồng bộ...`);
 }
 
-function addToTtsQueue(text) {
-  ttsQueue.push(text);
-  if (!isPlayingTts) {
-    playNextInTtsQueue();
+/**
+ * Handle SYNC_TIME message — find current subtitle and process it.
+ * @param {number} currentTimeMs
+ */
+function handleSyncTime(currentTimeMs) {
+  if (!isTranslating || subtitleTimeline.length === 0) return;
+
+  const index = subtitleTimeline.findIndex(s =>
+    currentTimeMs >= s.start && currentTimeMs <= (s.start + s.duration)
+  );
+
+  if (index !== -1 && index !== lastPlayedSubIndex) {
+    lastPlayedSubIndex = index;
+    processSubtitleItem(subtitleTimeline[index], index);
   }
 }
 
-async function playNextInTtsQueue() {
-  if (ttsQueue.length === 0) {
-    isPlayingTts = false;
-    return;
-  }
-
-  isPlayingTts = true;
-  const text = ttsQueue.shift();
+/**
+ * Process a single subtitle: translate if needed → update UI → queue TTS.
+ * @param {Object} sub
+ * @param {number} index
+ */
+async function processSubtitleItem(sub, index) {
+  if (!isTranslating) return;
 
   try {
-    // Determine engine to use from global ttsEngine variable (default 'edge')
-    currentEngine = engines[ttsEngine] || engines['edge'];
+    log(`[Offscreen] 📝 Subtitle ${index}: "${sub.text}"`);
 
-    log(`[Offscreen] 🔊 Speaking using ${currentEngine.name}: "${text.substring(0, 30)}..."`);
-    
-    await currentEngine.speak(text, ttsRate, ttsVoice);
-    
-    playNextInTtsQueue();
+    let translated = sub.translated;
 
+    if (!translated) {
+      const isTargetLang = currentSubLang &&
+        (currentSubLang.startsWith(targetLang) || currentSubLang.toLowerCase().includes(targetLang));
+
+      if (isTargetLang) {
+        translated = sub.text;
+      } else if (groqClient) {
+        translated = await groqClient.translateWithRetry(sub.text, currentSourceLang);
+      }
+
+      sub.translated = translated; // Cache
+    }
+
+    if (!translated || !isTranslating) return;
+
+    // Update UI
+    sendMessage({
+      type: 'UPDATE_TRANSCRIPT',
+      original: sub.text,
+      translated
+    });
+
+    // Queue TTS
+    ttsController.enqueue(translated);
   } catch (err) {
-    const errMsg = err?.message || 'Lỗi không xác định';
-    logError(`[Offscreen] ❌ TTS Engine Error (${currentEngine.id}):`, errMsg);
-    
-    // Report to UI
-    chrome.runtime.sendMessage({
-      type: 'UPDATE_TRANSCRIPT_ERROR',
-      message: `TTS Error: ${errMsg}`,
-      isError: true
-    }).catch(() => {});
-    playNextInTtsQueue();
+    logError(`[Offscreen] ❌ Subtitle ${index} error:`, err.message);
   }
 }
 
-/**
- * @param {string} text
- * @param {SpeechSynthesisVoice} voice
- */
-function playNativeTts(text, voice) {
-  return new Promise((resolve) => {
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.voice = voice;
-    utt.rate = ttsRate;
-    
-    // Native TTS here should also trigger ducking if called directly
-    chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: true }).catch(() => {});
-    
-    utt.onend = () => {
-      chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: false }).catch(() => {});
-      resolve(true);
-    };
-    utt.onerror = () => {
-      chrome.runtime.sendMessage({ type: 'TTS_STATE_CHANGED', playing: false }).catch(() => {});
-      resolve(false);
-    };
-    speechSynthesis.speak(utt);
-  });
+// ── Message Helpers ─────────────────────────────────────────────────────────
+
+function sendMessage(msg) {
+  chrome.runtime.sendMessage(msg).catch(() => {});
 }
 
-/**
- * Fallback to standard browser TTS if Edge TTS fails
- */
-function fallbackToDefaultTTS(text) {
-  log('[Offscreen] 🔄 Using browser default TTS fallback');
-  
-  // Use NativeTTS engine for fallback to maintain callback consistency
-  engines['native'].speak(text, ttsRate, '').then(() => {
-    playNextInTtsQueue();
-  }).catch(err => {
-    logError('[Offscreen] ❌ Fallback TTS error:', err);
-    playNextInTtsQueue();
-  });
+function sendError(message) {
+  sendMessage({ type: 'UPDATE_TRANSCRIPT_ERROR', message, isError: true });
 }
 
-
-/**
- * @param {string} message
- * @param {boolean} [isError=false]
- */
-function sendError(message, isError = true) {
-  chrome.runtime.sendMessage({
-    type: 'UPDATE_TRANSCRIPT_ERROR',
-    message,
-    isError
-  }).catch(() => {});
-}
-
-/**
- * @param {string} message
- */
 function sendStatus(message) {
-  chrome.runtime.sendMessage({
-    type: 'UPDATE_TRANSCRIPT_STATUS',
-    message,
-    isError: false
-  }).catch(() => {});
+  sendMessage({ type: 'UPDATE_TRANSCRIPT_STATUS', message, isError: false });
 }
 
-// ── Cleanup ────────────────────────────────────────────────────────────────────
+// ── Cleanup ─────────────────────────────────────────────────────────────────
 
-/**
- * Full cleanup — stop everything, release resources
- */
 function stopCapture() {
   stopTranslation();
 
@@ -608,92 +600,11 @@ function stopCapture() {
   log('[Offscreen] Capture fully stopped');
 }
 
-// ── Monitoring ─────────────────────────────────────────────────────────────────
+// ── Health Monitor ──────────────────────────────────────────────────────────
 
-/**
- * Periodically check if recorder is supposed to be running but isn't
- */
-function monitorRecorder() {
+setInterval(() => {
   if (isTranslating && (!mediaRecorder || mediaRecorder.state === 'inactive')) {
     logError('[Offscreen] Recorder stopped unexpectedly, restarting...');
     recordNextChunk();
   }
-}
-
-// Check every 10 seconds
-setInterval(monitorRecorder, 10000);
-
-// ── Subtitle Mode Helpers ─────────────────────────────────────────────────────
-
-/**
- * Handle PROCESS_SUBTITLES message
- * @param {Array} subs 
- * @param {string} subLang
- */
-async function handleProcessSubtitles(subs, subLang) {
-  log(`[Offscreen] 📦 Processing ${subs.length} subtitles (Lang: ${subLang}) for translation...`);
-  subtitleTimeline = subs;
-  currentSubLang = subLang;
-  lastPlayedSubIndex = -1;
-  sendStatus(`Đã tải ${subs.length} phụ đề. Đang đồng bộ...`);
-}
-
-/**
- * Handle SYNC_TIME message from content script
- * @param {number} currentTimeMs 
- */
-function handleSyncTime(currentTimeMs) {
-  if (!isTranslating || subtitleTimeline.length === 0) return;
-
-  // Find the current subtitle index based on video time
-  const index = subtitleTimeline.findIndex(s => 
-    currentTimeMs >= s.start && currentTimeMs <= (s.start + s.duration)
-  );
-
-  // Only process if it's a new subtitle
-  if (index !== -1 && index !== lastPlayedSubIndex) {
-    lastPlayedSubIndex = index;
-    const sub = subtitleTimeline[index];
-    processSubtitleItem(sub, index);
-  }
-}
-
-/**
- * Process a single subtitle item: translate and queue TTS
- * @param {object} sub 
- * @param {number} index 
- */
-async function processSubtitleItem(sub, index) {
-  if (!isTranslating) return;
-
-  try {
-    log(`[Offscreen] 📝 Sync: Subtitle ${index} -> "${sub.text}"`);
-    
-    // 1. Translate (if not already in Vietnamese)
-    let translated = sub.translated;
-    
-    if (!translated) {
-      const isTargetLang = currentSubLang && (currentSubLang.startsWith(targetLang) || currentSubLang.toLowerCase().includes(targetLang));
-      
-      if (isTargetLang) {
-        log(`[Offscreen] 🌐 Subtitle already in target language (${targetLang}), skipping translation.`);
-        translated = sub.text;
-      } else if (groqClient) {
-        translated = await groqClient.translateWithRetry(sub.text, currentSourceLang);
-      }
-      
-      sub.translated = translated; // Cache it
-    }
-
-    if (!translated || !isTranslating) return;
-
-    // 2. Update UI
-    sendTranscript(sub.text, translated);
-
-    // 3. Play TTS
-    addToTtsQueue(translated);
-
-  } catch (err) {
-    logError(`[Offscreen] ❌ Subtitle ${index} error:`, err.message);
-  }
-}
+}, 10000);

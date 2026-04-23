@@ -161,67 +161,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// ── Message Routing ────────────────────────────────────────────────────────
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'STOP_CAPTURE') {
-    stopAllCapture();
-    sendResponse({ success: true });
-
-  } else if (message.type === 'GET_EDGE_TOKEN') {
-    sendResponse({ token: edgeManager.getToken() });
-
-  } else if (message.type === 'GET_EDGE_VOICES') {
-    fetch('https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4')
-      .then(res => res.json())
-      .then(data => sendResponse({ voices: data }))
-      .catch(err => sendResponse({ voices: null, error: err.message }));
-    return true;
-
-  } else if (message.type === 'GET_CAPTURE_STATUS') {
-    sendResponse({ active: activeCaptureTabId !== null, tabId: activeCaptureTabId });
-
-  } else if (['START_TRANSLATION', 'STOP_TRANSLATION', 'SPEAK_SUBTITLE', 'TEST_TTS', 'PROCESS_SUBTITLES'].includes(message.type)) {
-    ensureOffscreenDocument().then(() => {
-      sendToOffscreen(message).then(() => sendResponse({ success: true }));
-    });
-    return true;
-
-  } else if (['UPDATE_TRANSCRIPT', 'UPDATE_TRANSCRIPT_ERROR', 'UPDATE_TRANSCRIPT_STATUS', 'TTS_STATE_CHANGED'].includes(message.type)) {
-    if (activeCaptureTabId) {
-      chrome.tabs.sendMessage(activeCaptureTabId, message).catch(() => {});
-    }
-  }
-
-  return false;
-});
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-async function injectContentScript(tabId) {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: [
-        'lib/utils.js',
-        'lib/extractors/base-extractor.js',
-        'lib/extractors/youtube-extractor.js',
-        'lib/extractors/tiktok-extractor.js',
-        'lib/subtitle-fetcher.js',
-        'content/content.js'
-      ]
-    });
-  } catch (err) {}
-}
-
-function stopAllCapture() {
-  activeCaptureTabId = null;
-  currentStreamId = null;
-  storageArea.remove(['activeCaptureTabId', 'currentStreamId']);
-  chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN_CAPTURE' }).catch(() => {});
-  closeOffscreenDocument();
-}
-
 // ── Subtitle URL Capture ────────────────────────────────────────────────────
 
 /** @type {Map<number, {url: string, videoId: string, timestamp: number}>} */
@@ -245,17 +184,99 @@ chrome.webRequest.onCompleted.addListener(
   { urls: ['*://www.youtube.com/api/timedtext*'] }
 );
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'GET_CAPTURED_SUB_URL') {
-    const tabId = sender.tab?.id;
-    const entry = tabId ? capturedSubUrls.get(tabId) : null;
-    const isValid = entry && (Date.now() - entry.timestamp < 5 * 60 * 1000);
+// ── Message Routing (SINGLE listener) ──────────────────────────────────────
 
-    if (isValid && (!message.videoId || entry.videoId === message.videoId)) {
-      sendResponse({ url: entry.url });
-    } else {
-      sendResponse({ url: null });
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  switch (message.type) {
+    // ── From content → background ───────────────────────────────────────
+    case 'STOP_CAPTURE':
+      stopAllCapture();
+      sendResponse({ success: true });
+      return false;
+
+    case 'GET_EDGE_TOKEN':
+      sendResponse({ token: edgeManager.getToken() });
+      return false;
+
+    case 'GET_EDGE_VOICES':
+      fetch('https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4')
+        .then(res => res.json())
+        .then(data => sendResponse({ voices: data }))
+        .catch(err => sendResponse({ voices: null, error: err.message }));
+      return true; // async
+
+    case 'GET_CAPTURE_STATUS':
+      sendResponse({ active: activeCaptureTabId !== null, tabId: activeCaptureTabId });
+      return false;
+
+    case 'GET_CAPTURED_SUB_URL': {
+      const tabId = sender.tab?.id;
+      const entry = tabId ? capturedSubUrls.get(tabId) : null;
+      const isValid = entry && (Date.now() - entry.timestamp < 5 * 60 * 1000);
+
+      if (isValid && (!message.videoId || entry.videoId === message.videoId)) {
+        sendResponse({ url: entry.url });
+      } else {
+        sendResponse({ url: null });
+      }
+      return false;
     }
-    return false;
+
+    // ── Forward to offscreen ────────────────────────────────────────────
+    case 'START_TRANSLATION':
+    case 'STOP_TRANSLATION':
+    case 'PROCESS_SUBTITLES':
+    case 'SPEAK_SUBTITLE':
+    case 'TEST_TTS':
+    case 'PRERENDER_SUBTITLES':
+    case 'PLAY_PRERENDERED':
+      ensureOffscreenDocument().then(() => {
+        sendToOffscreen(message).then(() => sendResponse({ success: true }));
+      });
+      return true; // async
+
+    // ── Forward from offscreen → content tab ────────────────────────────
+    case 'UPDATE_TRANSCRIPT':
+    case 'UPDATE_TRANSCRIPT_ERROR':
+    case 'UPDATE_TRANSCRIPT_STATUS':
+    case 'TTS_STATE_CHANGED':
+    case 'TTS_WORD_BOUNDARY':
+    case 'PRERENDER_COMPLETE':
+      if (activeCaptureTabId) {
+        chrome.tabs.sendMessage(activeCaptureTabId, message).catch(() => {});
+      }
+      return false;
+
+    default:
+      return false;
   }
 });
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+async function injectContentScript(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [
+        'lib/constants.js',
+        'lib/utils.js',
+        'lib/extractors/base-extractor.js',
+        'lib/extractors/youtube-extractor.js',
+        'lib/extractors/tiktok-extractor.js',
+        'lib/subtitle-fetcher.js',
+        'lib/subtitle-paginator.js',
+        'lib/subtitle-sync.js',
+        'content/content.js'
+      ]
+    });
+  } catch (err) {}
+}
+
+function stopAllCapture() {
+  activeCaptureTabId = null;
+  currentStreamId = null;
+  storageArea.remove(['activeCaptureTabId', 'currentStreamId']);
+  chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN_CAPTURE' }).catch(() => {});
+  closeOffscreenDocument();
+}

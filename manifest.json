@@ -49,11 +49,13 @@
       "*://*.coursera.org/*"
     ],
     "js": [
+      "lib/constants.js",
       "lib/utils.js",
       "lib/extractors/base-extractor.js",
       "lib/extractors/youtube-extractor.js",
       "lib/extractors/tiktok-extractor.js",
       "lib/subtitle-fetcher.js",
+      "lib/subtitle-paginator.js",
       "lib/subtitle-sync.js",
       "content/content.js"
     ],

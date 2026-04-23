@@ -14,15 +14,14 @@
   font-weight: 600;
   text-align: center;
 
-  /* Critical for preventing stretching */
-  width: fit-content;
-  max-width: 1000px;
-  display: inline-block;
+  /* Fixed width for consistent 2-line layout */
+  width: 1200px;
+  max-width: 95vw;
 
   cursor: move;
   pointer-events: auto;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.3);
   user-select: none;
   transition: opacity 0.3s ease;
   overflow-wrap: break-word;
@@ -36,8 +35,10 @@
 
 #vidtrans-subtitle-overlay .vidtrans-subtitle-text {
   display: block;
-  line-height: 1.5;
+  line-height: 1.4;
   word-wrap: break-word;
+  white-space: pre-line;
+  /* Multi-line allowed now that pagination is disabled */
 }
 
 #vidtrans-subtitle-overlay .vidtrans-subtitle-original {
@@ -45,4 +46,13 @@
   color: rgba(255, 255, 255, 0.6);
   margin-top: 6px;
   display: block;
+}
+
+/* Page indicator for paginated subtitles */
+#vidtrans-subtitle-overlay .vidtrans-subtitle-page-indicator {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  margin-top: 4px;
+  display: block;
+  letter-spacing: 2px;
 }
