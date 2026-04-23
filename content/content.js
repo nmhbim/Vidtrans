@@ -1087,7 +1087,7 @@
   let playerAdapter = null;
 
   async function startTranslationMode() {
-    const video = document.querySelector('video');
+    let video = document.querySelector('.html5-main-video') || document.querySelector('video');
     if (!video) {
       setStatus('Không tìm thấy video', 'error');
       isRunning = false;
@@ -1103,7 +1103,14 @@
         if (!ttsBridge) return;
         if (state === 'pause') ttsBridge.pause();
         if (state === 'play') ttsBridge.resume();
-        if (state === 'seeking') ttsBridge.pause(); // Pause while seeking
+        if (state === 'ended') ttsBridge.stop();
+        if (state === 'seeking') {
+          ttsBridge.pause();
+          // Reset dedup so seek-back replays audio correctly
+          chrome.runtime.sendMessage({ type: 'RESET_TTS_DEDUP' }).catch(() => {});
+          // Reset subtitle tracking so subtitles re-trigger at the new position
+          if (subtitleSync) subtitleSync.resetTracking();
+        }
       };
       playerAdapter.bindEvents();
     }
@@ -1112,9 +1119,6 @@
       // Try to get subtitles first
       setStatus('Đang quét phụ đề...', 'warning');
       console.log('[VidTrans] 🔍 Scanning for subtitles at:', window.location.href);
-
-      // Small delay to ensure YouTube scripts/DOM are ready
-      await new Promise(r => setTimeout(r, 800));
 
       // Ensure subtitle fetcher is initialized (retry if it was missing during boot)
       if (!subtitleFetcher) {
@@ -1257,9 +1261,42 @@ ${numbered}`;
     let events = subs.events;
 
     if (subs.needsTranslation) {
-      setStatus('Đang dịch toàn bộ phụ đề...', 'warning');
-      events = await groqTranslateBatch(subs.events, targetLang);
-      console.log('[VidTrans] ✅ Batch translation complete');
+      // ── Progressive Translation ────────────────────────────────────────────
+      // Translate only the FIRST chunk upfront so playback starts ASAP.
+      // Remaining chunks are translated in the background while audio plays.
+      const langName = LANG_NAMES[targetLang] || targetLang;
+      const firstChunkSize = Math.min(CHUNK_SIZE, events.length);
+      const firstBatch = events.slice(0, firstChunkSize);
+
+      setStatus(`Đang dịch ${firstChunkSize} dòng đầu...`, 'warning');
+      try {
+        const translated = await translateChunk(
+          firstBatch.map(e => e.text),
+          langName
+        );
+        firstBatch.forEach((e, i) => {
+          if (translated[i]) e.translated = translated[i];
+        });
+        console.log(`[VidTrans] ✅ First chunk translated (${firstChunkSize} lines) — starting playback`);
+      } catch (err) {
+        console.error('[VidTrans] ❌ First chunk translation failed, using originals:', err.message);
+      }
+
+      // Translate the rest in the background (non-blocking)
+      if (events.length > firstChunkSize) {
+        console.log(`[VidTrans] 🔄 Background translating remaining ${events.length - firstChunkSize} lines...`);
+        groqTranslateBatch(events.slice(firstChunkSize), targetLang)
+          .then(translatedRest => {
+            translatedRest.forEach((e, i) => {
+              // Merge translations back into the shared events array
+              if (e.translated) events[firstChunkSize + i].translated = e.translated;
+            });
+            console.log('[VidTrans] ✅ Background translation complete');
+          })
+          .catch(err => {
+            console.error('[VidTrans] ❌ Background translation failed:', err.message);
+          });
+      }
     }
 
     subtitleSync = new window.SubtitleSync();
@@ -1473,6 +1510,11 @@ ${numbered}`;
     } else if (msg.type === 'CHECK_UI') {
       // Background checking if UI exists — respond ok
       chrome.runtime.sendMessage({ type: 'UI_OK' });
+    } else if (msg.type === 'FORCE_STOP_TRANSLATION') {
+      if (isRunning) {
+        console.log('[VidTrans] 🛑 Force stopping translation due to background request (navigation/refresh)');
+        stopTranslation();
+      }
     }
   });
 
@@ -1482,13 +1524,10 @@ ${numbered}`;
     document.addEventListener('yt-navigate-finish', () => {
       console.log('[VidTrans] 🔄 YouTube navigation detected');
 
-      // If we are running, we need to restart for the new video
+      // If we are running, stop translation for the new video
       if (isRunning) {
-        console.log('[VidTrans] 🔄 Restarting translation for new video...');
+        console.log('[VidTrans] 🛑 Stopping translation for new video...');
         stopTranslation();
-        setTimeout(() => {
-          startTranslation();
-        }, 1000); // Give it a moment to settle
       }
     });
 
@@ -1506,6 +1545,13 @@ ${numbered}`;
   } else {
     setStatus('Chưa có API Key', 'warning');
   }
+
+  // Ensure cleanup on normal page refresh/unload
+  window.addEventListener('beforeunload', () => {
+    if (isRunning) {
+      stopTranslation();
+    }
+  });
 
   // Debug helper: Export raw data to file
   window.__vidtrans_export_raw = function () {

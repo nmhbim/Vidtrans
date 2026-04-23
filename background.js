@@ -154,10 +154,19 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (tabId === activeCaptureTabId && changeInfo.status === 'complete') {
-    chrome.tabs.sendMessage(tabId, { type: 'CHECK_UI' }).catch(() => {
-      injectContentScript(tabId);
-    });
+  if (tabId === activeCaptureTabId) {
+    if (changeInfo.status === 'loading' || changeInfo.url) {
+      console.log('[Background] 🔄 Tab navigating or refreshing. Stopping translation...');
+      sendToOffscreen({ type: 'STOP_TRANSLATION' }).catch(() => {});
+      // Notify content script to update its UI state, useful for SPA navigations
+      chrome.tabs.sendMessage(tabId, { type: 'FORCE_STOP_TRANSLATION' }).catch(() => {});
+    }
+    
+    if (changeInfo.status === 'complete') {
+      chrome.tabs.sendMessage(tabId, { type: 'CHECK_UI' }).catch(() => {
+        injectContentScript(tabId);
+      });
+    }
   }
 });
 
@@ -232,6 +241,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'PLAY_PRERENDERED':
     case 'PAUSE_TTS':
     case 'RESUME_TTS':
+    case 'RESET_TTS_DEDUP':
       ensureOffscreenDocument().then(() => {
         sendToOffscreen(message).then(() => sendResponse({ success: true }));
       });
@@ -269,6 +279,8 @@ async function injectContentScript(tabId) {
         'lib/subtitle-fetcher.js',
         'lib/subtitle-paginator.js',
         'lib/subtitle-sync.js',
+        'lib/player-adapter.js',
+        'lib/adapters/youtube-adapter.js',
         'content/content.js'
       ]
     });

@@ -173,6 +173,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ success: true });
       break;
 
+    case 'RESET_TTS_DEDUP':
+      ttsController.resetDedup();
+      sendResponse({ success: true });
+      break;
+
     case 'STOP_OFFSCREEN_CAPTURE':
       log('[Offscreen] 🛑 Stopping all capture...');
       stopCapture();
