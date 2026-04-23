@@ -597,7 +597,7 @@
     if (!subtitlePaginator && window.SubtitlePaginator) {
       subtitlePaginator = new window.SubtitlePaginator({
         maxLines: 2,
-        charsPerLine: 45,
+        charsPerLine: 100,
       });
     }
     return subtitlePaginator;
