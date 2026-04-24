@@ -5,9 +5,9 @@
   "version": "1.0.0",
   "default_locale": "vi",
   "icons": {
-    "16": "icons/icon-16.png",
-    "48": "icons/icon-48.png",
-    "128": "icons/icon-128.png"
+    "16": "src/icons/icon-16.png",
+    "48": "src/icons/icon-48.png",
+    "128": "src/icons/icon-128.png"
   },
   "permissions": [
     "offscreen",
@@ -34,46 +34,48 @@
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://* wss://*"
   },
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "src/background/service-worker.ts",
     "type": "module"
   },
-  "content_scripts": [{
-    "matches": [
-      "*://*.youtube.com/*",
-      "*://*.facebook.com/*",
-      "*://*.twitter.com/*",
-      "*://*.x.com/*",
-      "*://*.tiktok.com/*",
-      "*://*.netflix.com/*",
-      "*://*.udemy.com/*",
-      "*://*.coursera.org/*"
-    ],
-    "js": [
-      "lib/constants.js",
-      "lib/utils.js",
-      "lib/extractors/base-extractor.js",
-      "lib/extractors/youtube-extractor.js",
-      "lib/extractors/tiktok-extractor.js",
-      "lib/subtitle-fetcher.js",
-      "lib/subtitle-paginator.js",
-      "lib/subtitle-sync.js",
-      "lib/player-adapter.js",
-      "lib/adapters/youtube-adapter.js",
-      "content/content.js"
-    ],
-    "css": ["content/content.css"],
-    "all_frames": false,
-    "run_at": "document_idle"
-  }, {
-    "matches": ["*://*.youtube.com/*"],
-    "js": ["lib/pot-interceptor.js"],
-    "run_at": "document_idle",
-    "all_frames": false
-  }],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://*.facebook.com/*",
+        "*://*.twitter.com/*",
+        "*://*.x.com/*",
+        "*://*.tiktok.com/*",
+        "*://*.netflix.com/*",
+        "*://*.udemy.com/*",
+        "*://*.coursera.org/*"
+      ],
+      "js": [
+        "src/content/content-script.ts"
+      ],
+      "all_frames": false,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "js": [
+        "src/lib/pot-interceptor.ts"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/offscreen/offscreen.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "action": {
     "default_icon": {
-      "16": "icons/icon-16.png",
-      "48": "icons/icon-48.png"
+      "16": "src/icons/icon-16.png",
+      "48": "src/icons/icon-48.png"
     },
     "default_title": "__MSG_extName__"
   },
